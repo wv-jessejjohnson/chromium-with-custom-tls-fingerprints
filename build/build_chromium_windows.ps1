@@ -176,12 +176,19 @@ $chromiumSrcDir = Join-Path $SourceDir "src"
 
 if (-not (Test-Path $chromiumSrcDir)) {
     # Initial checkout: gclient sync fetches the full source tree.
-    Write-Host "  Initial source fetch via gclient sync (~30-60 min)..."
+    Write-Host "  Initial source fetch via gclient sync (~30-60 min, -j 4)..."
     $savedPref = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    gclient sync --no-history --with_branch_heads --with_tags
-    $syncCode = $LASTEXITCODE
+    $syncOk = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        gclient sync --no-history --with_branch_heads --with_tags -j 4
+        if ($LASTEXITCODE -eq 0) { $syncOk = $true; break }
+        if ($attempt -lt 3) {
+            Write-Host "  gclient sync failed (attempt $attempt/3). Waiting 90 s..."
+            Start-Sleep -Seconds 90
+        }
+    }
     $ErrorActionPreference = $savedPref
-    if ($syncCode -ne 0) { Fail "gclient sync (initial) failed" }
+    if (-not $syncOk) { Fail "gclient sync (initial) failed after 3 attempts" }
 } else {
     Write-Host "  Source already present."
 }
@@ -223,15 +230,29 @@ if ($checkoutCode -ne 0) {
 }
 Write-Host "  Checked out Chromium $chromiumVersion."
 
-# Sync dependencies for the checked-out revision (third_party, BoringSSL, etc.).
-Write-Host "  Syncing dependencies for checked-out revision (~20-40 min)..."
-$savedPref = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-gclient sync --no-history --with_branch_heads --with_tags -D
-$syncCode = $LASTEXITCODE
-$ErrorActionPreference = $savedPref
-if ($syncCode -ne 0) { Fail "gclient sync (deps) failed" }
+Pop-Location  # back to $SourceDir (where .gclient lives -- gclient must run here)
 
-Pop-Location  # back to $SourceDir
+# Sync dependencies for the checked-out revision (third_party, BoringSSL, etc.).
+# -j 4 limits parallel fetches; the default (16+) often triggers Google's 429
+# rate limit when syncing Chromium's 200+ dependencies at once.
+# Retry up to 3 times with a 90-second wait for transient 429 / network errors.
+Write-Host "  Syncing dependencies for checked-out revision (~20-40 min)..."
+Write-Host "  (Using -j 4 to avoid Google server rate limits)"
+$savedPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$syncOk = $false
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    gclient sync --no-history --with_branch_heads --with_tags -D -j 4
+    if ($LASTEXITCODE -eq 0) { $syncOk = $true; break }
+    if ($attempt -lt 3) {
+        Write-Host "  gclient sync failed (attempt $attempt/3). Waiting 90 s before retry..."
+        Write-Host "  (This is usually a transient 429 rate-limit from Google's servers.)"
+        Start-Sleep -Seconds 90
+    }
+}
+$ErrorActionPreference = $savedPref
+if (-not $syncOk) { Fail "gclient sync failed after 3 attempts" }
+
 Pop-Location  # back to original
 
 # --- 4. Apply patches --------------------------------------------------------
