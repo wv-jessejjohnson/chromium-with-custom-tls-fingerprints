@@ -197,19 +197,23 @@ Write-Host "  Checking out Chromium $chromiumVersion..."
 $savedPref = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 
-# Fetch just the one tag we need (much faster than fetching all tags).
-Write-Host "  Fetching tag $chromiumVersion from origin..."
-$null = git fetch origin tag $chromiumVersion 2>&1
+# Fetch just the one tag we need.
+Write-Host "  Fetching tag $chromiumVersion from origin (may take a few minutes)..."
+git fetch origin tag $chromiumVersion
 if ($LASTEXITCODE -ne 0) {
-    # Non-zero is normal if the tag already exists locally.
-    # Try a full tags fetch as fallback before giving up.
-    Write-Host "  Trying full tags fetch as fallback..."
-    $null = git fetch --tags origin 2>&1
-    # Ignore exit code here -- we'll know in the checkout step.
+    Write-Host "  Tag fetch returned non-zero; trying full tags fetch as fallback..."
+    git fetch --tags origin
+    # Ignore exit code -- the checkout below will confirm whether we have it.
 }
 
-Write-Host "  Running git checkout refs/tags/$chromiumVersion..."
-$null = git checkout "refs/tags/$chromiumVersion" 2>&1
+# NOTE: Chromium has ~400 000 files. Checking out a tag rewrites every file
+# that differs from the current HEAD. This can take 10-30 minutes on HDD,
+# 5-15 minutes on SSD. The terminal will appear frozen -- that is normal.
+Write-Host ""
+Write-Host "  Running: git checkout refs/tags/$chromiumVersion"
+Write-Host "  Chromium has ~400 000 files. This step takes 5-30 min -- please wait."
+Write-Host ""
+git checkout "refs/tags/$chromiumVersion"
 $checkoutCode = $LASTEXITCODE
 
 $ErrorActionPreference = $savedPref
