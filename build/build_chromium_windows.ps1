@@ -137,7 +137,8 @@ if (-not $chromiumRevision) {
 
 # Resolve to a Chromium git tag/branch if available.
 $chromiumTag = $CHROMIUM_TAGS[$chromiumRevision]
-Write-Host "  Chromium tag       : $($chromiumTag ?? 'unknown (will use position)')"
+$chromiumTagDisplay = if ($chromiumTag) { $chromiumTag } else { 'unknown (will use position)' }
+Write-Host "  Chromium tag       : $chromiumTagDisplay"
 
 # ── 3. Fetch Chromium source ─────────────────────────────────────────────────
 Write-Step "Fetching Chromium source (this may take 30-60 min on first run)"
@@ -312,6 +313,7 @@ if (Test-Path $localesDir) {
 Write-Host "`n[SUCCESS] Build complete!" -ForegroundColor Green
 Write-Host "  Chromium binary : $DIST_DIR\chrome.exe" -ForegroundColor Green
 Write-Host ""
+$exeDisplay = $DIST_DIR + "\chrome.exe"
 Write-Host "  Use with Playwright:"
-Write-Host "    from playwright_tls import launch_browser"
-Write-Host "    browser = await launch_browser(p, executable_path=r'$DIST_DIR\chrome.exe')"
+Write-Host "    from playwright_tls import BrowserWithTLS"
+Write-Host "    async with BrowserWithTLS(p, executable_path='$exeDisplay') as b: ..."
