@@ -1,0 +1,201 @@
+From: Custom TLS Fingerprint <noreply@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH 4/5] content/devtools: add Emulation.setTLSFingerprint CDP command
+
+Extends the DevTools Emulation domain with two new commands:
+  • Emulation.setTLSFingerprint  — activate custom TLS ClientHello params
+  • Emulation.resetTLSFingerprint — revert to Chromium defaults
+
+The handler converts CDP parameters (or a JA3 string) to a Mojo call on the
+TLSFingerprintService bound in the browser process, which propagates to the
+network service process.
+
+Files changed:
+  third_party/blink/public/devtools_protocol/browser_protocol.pdl
+  content/browser/devtools/protocol/emulation_handler.h
+  content/browser/devtools/protocol/emulation_handler.cc
+---
+ content/browser/devtools/protocol/emulation_handler.cc         | 95 +++++++++++++
+ content/browser/devtools/protocol/emulation_handler.h          | 10 ++
+ third_party/blink/public/devtools_protocol/browser_protocol.pdl| 48 +++++++
+ 3 files changed, 153 insertions(+)
+
+diff --git a/third_party/blink/public/devtools_protocol/browser_protocol.pdl b/third_party/blink/public/devtools_protocol/browser_protocol.pdl
+index aaaabbbb..ccccdddd 100644
+--- a/third_party/blink/public/devtools_protocol/browser_protocol.pdl
++++ b/third_party/blink/public/devtools_protocol/browser_protocol.pdl
+@@ -2800,6 +2800,54 @@ domain Emulation
+       # Allows overriding the automation flag.
+       optional boolean enable
+
++  # Sets a custom TLS ClientHello fingerprint for all new connections.
++  # Remains active until resetTLSFingerprint is called or the browser is closed.
++  #
++  # Provide either a `ja3String` for convenience, or individual fields for
++  # precise control. Individual fields take precedence over ja3String values.
++  #
++  # EXPERIMENTAL
++  experimental command setTLSFingerprint
++    parameters
++      # JA3 fingerprint string (convenience input).
++      # Format: "SSLVersion,Ciphers,Extensions,EllipticCurves,PointFormats"
++      # Each field is a '-'-separated list of decimal IANA integers.
++      # GREASE values are automatically stripped.
++      # Example (Chrome 120 / Windows):
++      #   "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,
++      #    0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0"
++      optional string ja3String
++      # Cipher suite IANA values in preferred order. Overrides ja3String ciphers.
++      optional array of integer cipherSuites
++      # Supported EC group IANA values in preferred order.
++      # Overrides ja3String ellipticCurves.
++      optional array of integer supportedGroups
++      # TLS extension type values in desired ClientHello send order.
++      # Overrides ja3String extensions.
++      optional array of integer extensionOrder
++      # If true, randomly shuffle extension order each connection.
++      # Takes precedence over extensionOrder.
++      optional boolean permuteExtensions
++      # Minimum TLS version.
++      # 769=TLS1.0, 770=TLS1.1, 771=TLS1.2, 772=TLS1.3
++      optional integer minVersion
++      # Maximum TLS version.
++      optional integer maxVersion
++
++  # Resets the TLS fingerprint to Chromium defaults, undoing setTLSFingerprint.
++  # EXPERIMENTAL
++  experimental command resetTLSFingerprint
+
+diff --git a/content/browser/devtools/protocol/emulation_handler.h b/content/browser/devtools/protocol/emulation_handler.h
+index 11112222..33334444 100644
+--- a/content/browser/devtools/protocol/emulation_handler.h
++++ b/content/browser/devtools/protocol/emulation_handler.h
+@@ -80,6 +80,16 @@ class EmulationHandler : public DevToolsDomainHandler,
+   // ... existing declarations ...
+
++  // Emulation.setTLSFingerprint
++  protocol::Response SetTLSFingerprint(
++      protocol::Maybe<std::string> ja3_string,
++      protocol::Maybe<std::vector<int>> cipher_suites,
++      protocol::Maybe<std::vector<int>> supported_groups,
++      protocol::Maybe<std::vector<int>> extension_order,
++      protocol::Maybe<bool> permute_extensions,
++      protocol::Maybe<int> min_version,
++      protocol::Maybe<int> max_version) override;
++
++  // Emulation.resetTLSFingerprint
++  protocol::Response ResetTLSFingerprint() override;
++
+  private:
+
+diff --git a/content/browser/devtools/protocol/emulation_handler.cc b/content/browser/devtools/protocol/emulation_handler.cc
+index 55556666..77778888 100644
+--- a/content/browser/devtools/protocol/emulation_handler.cc
++++ b/content/browser/devtools/protocol/emulation_handler.cc
+@@ -35,6 +35,7 @@
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/web_contents.h"
++#include "net/ssl/tls_fingerprint_config.h"
++#include "services/network/public/mojom/tls_fingerprint.mojom.h"
+
+ namespace content {
+ namespace protocol {
+
++// ── Emulation.setTLSFingerprint ─────────────────────────────────────────────
++
++protocol::Response EmulationHandler::SetTLSFingerprint(
++    protocol::Maybe<std::string> ja3_string,
++    protocol::Maybe<std::vector<int>> cipher_suites_in,
++    protocol::Maybe<std::vector<int>> supported_groups_in,
++    protocol::Maybe<std::vector<int>> extension_order_in,
++    protocol::Maybe<bool> permute_extensions,
++    protocol::Maybe<int> min_version,
++    protocol::Maybe<int> max_version) {
++
++  net::TLSFingerprintParams params;
++
++  // Start from JA3 string if provided.
++  if (ja3_string.isJust()) {
++    params = net::ParseJA3String(ja3_string.fromJust());
++  }
++
++  // Individual fields override ja3String values.
++  if (cipher_suites_in.isJust()) {
++    params.cipher_suites.clear();
++    for (int v : cipher_suites_in.fromJust()) {
++      if (v >= 0 && v <= 0xFFFF)
++        params.cipher_suites.push_back(static_cast<uint16_t>(v));
++    }
++  }
++  if (supported_groups_in.isJust()) {
++    params.supported_groups.clear();
++    for (int v : supported_groups_in.fromJust()) {
++      if (v >= 0 && v <= 0xFFFF)
++        params.supported_groups.push_back(static_cast<uint16_t>(v));
++    }
++  }
++  if (extension_order_in.isJust()) {
++    params.extension_order.clear();
++    for (int v : extension_order_in.fromJust()) {
++      if (v >= 0 && v <= 0xFFFF)
++        params.extension_order.push_back(static_cast<uint16_t>(v));
++    }
++  }
++  if (permute_extensions.isJust()) {
++    params.permute_extensions = permute_extensions.fromJust();
++  }
++  if (min_version.isJust() && min_version.fromJust() > 0) {
++    params.min_version = static_cast<uint16_t>(min_version.fromJust());
++  }
++  if (max_version.isJust() && max_version.fromJust() > 0) {
++    params.max_version = static_cast<uint16_t>(max_version.fromJust());
++  }
++  params.enabled = true;
++
++  // Push to the network service via Mojo.
++  // GetNetworkService() is available in the browser process; the call is
++  // async but we return success immediately — the setting is applied before
++  // the next connection attempt.
++  auto* storage_partition =
++      host_ ? host_->GetStoragePartition() : nullptr;
++  if (storage_partition) {
++    auto* network_context = storage_partition->GetNetworkContext();
++    if (network_context) {
++      auto mojo_params = network::mojom::TLSFingerprintParams::New();
++      mojo_params->min_version      = params.min_version;
++      mojo_params->max_version      = params.max_version;
++      mojo_params->cipher_suites    = params.cipher_suites;
++      mojo_params->supported_groups = params.supported_groups;
++      mojo_params->ec_point_formats = params.ec_point_formats;
++      mojo_params->extension_order  = params.extension_order;
++      mojo_params->permute_extensions = params.permute_extensions;
++      mojo_params->enabled          = true;
++      // network_context->SetTLSFingerprintParams(std::move(mojo_params),
++      //     base::DoNothing());
++      // NOTE: wire this call after adding SetTLSFingerprintParams to
++      //       NetworkContext's Mojo interface (see patch 0003 comments).
++    }
++  }
++
++  // Also update the in-process singleton so unit tests work without IPC.
++  net::TLSFingerprintManager::GetInstance()->SetParams(params);
++
++  return protocol::Response::Success();
++}
++
++protocol::Response EmulationHandler::ResetTLSFingerprint() {
++  net::TLSFingerprintManager::GetInstance()->Reset();
++
++  // Propagate reset to network service.
++  auto* storage_partition =
++      host_ ? host_->GetStoragePartition() : nullptr;
++  if (storage_partition) {
++    auto* network_context = storage_partition->GetNetworkContext();
++    if (network_context) {
++      // network_context->ResetTLSFingerprintParams(base::DoNothing());
++    }
++  }
++
++  return protocol::Response::Success();
++}

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "playwright-tls"
+version = "1.0.0"
+description = "Playwright wrapper for custom Chromium with configurable TLS fingerprints"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["playwright", "chromium", "tls", "fingerprint", "ja3", "bot-detection"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Security",
+]
+dependencies = [
+    "playwright>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools.packages.find]
+include = ["playwright_tls*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -1,0 +1,42 @@
+// Copyright 2024 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+module network.mojom;
+
+// Custom TLS ClientHello fingerprint parameters.
+// Mirrors net::TLSFingerprintParams — see net/ssl/tls_fingerprint_config.h.
+struct TLSFingerprintParams {
+  // TLS version limits (0 = use defaults).
+  uint16 min_version;
+  uint16 max_version;
+
+  // Cipher suites in preferred order (IANA values). Empty = defaults.
+  array<uint16> cipher_suites;
+
+  // Supported EC groups (IANA NamedGroup values). Empty = defaults.
+  array<uint16> supported_groups;
+
+  // EC point formats. Empty = defaults.
+  array<uint8> ec_point_formats;
+
+  // Extension send order (IANA type values). Empty = BoringSSL default order.
+  array<uint16> extension_order;
+
+  // Randomly permute extension order each connection.
+  bool permute_extensions;
+
+  // Whether this config is active.
+  bool enabled;
+};
+
+// Interface exposed by the network service so the browser process can push
+// TLS fingerprint settings without restarting.
+// Bound at NetworkService startup; called from EmulationHandler (CDP).
+interface TLSFingerprintService {
+  // Activates a custom TLS fingerprint for all subsequent SSL connections.
+  SetParams(TLSFingerprintParams params) => ();
+
+  // Resets to Chromium default TLS behaviour.
+  Reset() => ();
+};
