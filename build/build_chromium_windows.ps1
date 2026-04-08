@@ -313,7 +313,8 @@ if (Test-Path $localesDir) {
 Write-Host "`n[SUCCESS] Build complete!" -ForegroundColor Green
 Write-Host "  Chromium binary : $DIST_DIR\chrome.exe" -ForegroundColor Green
 Write-Host ""
-$exeDisplay = $DIST_DIR + "\chrome.exe"
-Write-Host "  Use with Playwright:"
-Write-Host "    from playwright_tls import BrowserWithTLS"
-Write-Host "    async with BrowserWithTLS(p, executable_path='$exeDisplay') as b: ..."
+$exeDisplay = $DIST_DIR + '\chrome.exe'
+Write-Host '  Use with Playwright:'
+Write-Host '    from playwright_tls import BrowserWithTLS'
+$pwLine = '    async with BrowserWithTLS(p, executable_path=' + $exeDisplay + ') as b: ...'
+Write-Host $pwLine
