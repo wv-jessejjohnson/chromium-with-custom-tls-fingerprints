@@ -177,32 +177,55 @@ $chromiumSrcDir = Join-Path $SourceDir "src"
 if (-not (Test-Path $chromiumSrcDir)) {
     # Initial checkout: gclient sync fetches the full source tree.
     Write-Host "  Initial source fetch via gclient sync (~30-60 min)..."
+    $savedPref = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     gclient sync --no-history --with_branch_heads --with_tags
-    if ($LASTEXITCODE -ne 0) { Fail "gclient sync (initial) failed" }
+    $syncCode = $LASTEXITCODE
+    $ErrorActionPreference = $savedPref
+    if ($syncCode -ne 0) { Fail "gclient sync (initial) failed" }
 } else {
     Write-Host "  Source already present."
 }
 
 # Check out the specific Chromium release tag that matches Playwright.
-# Chromium tags are exactly the version string, e.g. "124.0.6367.78".
+# Chromium tags are exactly the version string, e.g. "141.0.7390.37".
 Push-Location $chromiumSrcDir
 Write-Host "  Checking out Chromium $chromiumVersion..."
 
-# Fetch the specific tag (much faster than fetching all tags).
-git fetch --depth=1 origin "refs/tags/$chromiumVersion`:refs/tags/$chromiumVersion" 2>&1
+# git always writes progress/info to stderr. With $ErrorActionPreference='Stop'
+# at the top of this script, PS would turn those lines into terminating errors.
+# Save and restore the preference around every git call.
+$savedPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+
+# Fetch just the one tag we need (much faster than fetching all tags).
+Write-Host "  Fetching tag $chromiumVersion from origin..."
+$null = git fetch origin tag $chromiumVersion 2>&1
 if ($LASTEXITCODE -ne 0) {
-    # Depth-limited fetch failed; fall back to a full tag fetch.
-    Write-Host "  Shallow fetch failed, trying full tag fetch..."
-    git fetch --tags origin 2>&1 | Out-Null
+    # Non-zero is normal if the tag already exists locally.
+    # Try a full tags fetch as fallback before giving up.
+    Write-Host "  Trying full tags fetch as fallback..."
+    $null = git fetch --tags origin 2>&1
+    # Ignore exit code here -- we'll know in the checkout step.
 }
 
-git checkout "refs/tags/$chromiumVersion" --
-if ($LASTEXITCODE -ne 0) { Fail "git checkout $chromiumVersion failed" }
+Write-Host "  Running git checkout refs/tags/$chromiumVersion..."
+$null = git checkout "refs/tags/$chromiumVersion" 2>&1
+$checkoutCode = $LASTEXITCODE
+
+$ErrorActionPreference = $savedPref
+
+if ($checkoutCode -ne 0) {
+    Fail "git checkout refs/tags/$chromiumVersion failed (exit $checkoutCode)"
+}
+Write-Host "  Checked out Chromium $chromiumVersion."
 
 # Sync dependencies for the checked-out revision (third_party, BoringSSL, etc.).
 Write-Host "  Syncing dependencies for checked-out revision (~20-40 min)..."
+$savedPref = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 gclient sync --no-history --with_branch_heads --with_tags -D
-if ($LASTEXITCODE -ne 0) { Fail "gclient sync (deps) failed" }
+$syncCode = $LASTEXITCODE
+$ErrorActionPreference = $savedPref
+if ($syncCode -ne 0) { Fail "gclient sync (deps) failed" }
 
 Pop-Location  # back to $SourceDir
 Pop-Location  # back to original
