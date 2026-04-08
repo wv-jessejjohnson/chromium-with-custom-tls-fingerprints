@@ -149,49 +149,67 @@ if (-not (Test-Path $SourceDir)) {
 
 Push-Location $SourceDir
 
-# Write .gclient file if missing.
-if (-not (Test-Path (Join-Path $SourceDir ".gclient"))) {
+# Write .gclient if not already present.
+# NOTE: we do NOT call 'fetch chromium' because fetch refuses to run when
+# .gclient already exists. We manage .gclient ourselves and drive everything
+# through 'gclient sync', which is exactly what 'fetch' does internally.
+$gclientPath = Join-Path $SourceDir ".gclient"
+if (-not (Test-Path $gclientPath)) {
     Write-Host "  Writing .gclient configuration..."
-    @"
-solutions = [
-  {
-    "name": "src",
-    "url": "https://chromium.googlesource.com/chromium/src.git",
-    "managed": False,
-    "custom_deps": {},
-    "custom_vars": {},
-  },
-]
-target_os = ["win"]
-"@ | Set-Content ".gclient"
+    # Use Out-File with ASCII encoding to avoid BOM / encoding issues.
+    $gclientContent = 'solutions = [' + "`n" +
+        '  {' + "`n" +
+        '    "name": "src",' + "`n" +
+        '    "url": "https://chromium.googlesource.com/chromium/src.git",' + "`n" +
+        '    "managed": False,' + "`n" +
+        '    "custom_deps": {},' + "`n" +
+        '    "custom_vars": {},' + "`n" +
+        '  },' + "`n" +
+        ']' + "`n" +
+        'target_os = ["win"]' + "`n"
+    [System.IO.File]::WriteAllText($gclientPath, $gclientContent,
+        [System.Text.Encoding]::ASCII)
 }
 
-# Fetch or update.
-if (-not (Test-Path (Join-Path $SourceDir "src"))) {
-    Write-Host "  Running 'fetch chromium' (first run ~30-60 min)..."
-    fetch chromium
-    if ($LASTEXITCODE -ne 0) { Fail "'fetch chromium' failed" }
+$chromiumSrcDir = Join-Path $SourceDir "src"
+
+if (-not (Test-Path $chromiumSrcDir)) {
+    # Initial checkout: gclient sync fetches the full source tree.
+    Write-Host "  Initial source fetch via gclient sync (~30-60 min)..."
+    gclient sync --no-history --with_branch_heads --with_tags
+    if ($LASTEXITCODE -ne 0) { Fail "gclient sync (initial) failed" }
 } else {
-    Write-Host "  Source already present, updating..."
+    Write-Host "  Source already present."
 }
 
-# Check out the specific revision.
-Push-Location (Join-Path $SourceDir "src")
-Write-Host "  Checking out Chromium for revision $chromiumRevision..."
+# Check out the specific Chromium revision that matches Playwright.
+Push-Location $chromiumSrcDir
+Write-Host "  Checking out Chromium revision $chromiumRevision..."
 
-# Use the Playwright revision directly (it maps to a chromium position).
 if ($chromiumTag) {
     git fetch --tags origin "refs/tags/$chromiumTag" 2>&1 | Out-Null
-    git checkout "refs/tags/$chromiumTag" 2>&1
+    git checkout "refs/tags/$chromiumTag"
+    if ($LASTEXITCODE -ne 0) { Fail "git checkout $chromiumTag failed" }
 } else {
-    # Fall back to fetching by commit position (slower).
+    # Revision is a Chromium commit-position number, not a tag.
+    # Use 'git log' to find the matching commit hash via the Cr-Commit-Position footer.
+    Write-Host "  No tag found; searching for commit at position $chromiumRevision..."
     git fetch origin 2>&1 | Out-Null
+    $hash = git log --format="%H %s" origin/main |
+        Select-String "Cr-Commit-Position: refs/heads/main@\{#$chromiumRevision\}" |
+        Select-Object -First 1 | ForEach-Object { $_.Line.Split(' ')[0] }
+    if ($hash) {
+        git checkout $hash
+        if ($LASTEXITCODE -ne 0) { Fail "git checkout $hash failed" }
+    } else {
+        Write-Host "  WARNING: could not resolve position $chromiumRevision, staying on current HEAD."
+    }
 }
 
-# Sync all dependencies (third_party, etc.).
-Write-Host "  Running gclient sync (may take 20-40 min)..."
+# Sync dependencies for the checked-out revision (third_party, BoringSSL, etc.).
+Write-Host "  Syncing dependencies for checked-out revision (~20-40 min)..."
 gclient sync --no-history --with_branch_heads --with_tags -D
-if ($LASTEXITCODE -ne 0) { Fail "gclient sync failed" }
+if ($LASTEXITCODE -ne 0) { Fail "gclient sync (deps) failed" }
 
 Pop-Location  # back to $SourceDir
 Pop-Location  # back to original
