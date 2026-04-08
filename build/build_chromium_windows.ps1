@@ -68,21 +68,16 @@ function Require-Command {
     }
 }
 
-# --- Playwright -> Chromium revision table -----------------------------------
-# Maps Playwright versions to the Chromium git revision (cr_rev) they bundle.
+# --- Playwright version -> Chromium version string table ---------------------
+# Maps Playwright Python versions to the Chromium release tag they ship with.
+# Used only when the installed playwright package cannot be queried.
 # Source: https://github.com/microsoft/playwright/blob/main/packages/playwright-core/browsers.json
-$PLAYWRIGHT_CHROMIUM_REVISIONS = @{
-    "1.44.0" = "1228965";  # Chromium 125.0.6422.14
-    "1.43.0" = "1225249";  # Chromium 124.0.6367.78
-    "1.42.0" = "1211"    ;  # Chromium 123.0.6312.4
-    "1.41.0" = "1211"    ;
-    "1.40.0" = "1204"    ;
-}
-
-# Chromium revision -> branch/tag
-$CHROMIUM_TAGS = @{
-    "1228965" = "125.0.6422.14";
-    "1225249" = "124.0.6367.78";
+$PLAYWRIGHT_CHROMIUM_VERSIONS = @{
+    "1.44.0" = "125.0.6422.14";
+    "1.43.0" = "124.0.6367.78";
+    "1.42.0" = "123.0.6312.58";
+    "1.41.0" = "122.0.6261.128";
+    "1.40.0" = "121.0.6167.57";
 }
 
 Write-Step "Configuration"
@@ -104,41 +99,47 @@ if ($env:DEPOT_TOOLS_WIN_TOOLCHAIN -ne "0") {
 # --- 2. Determine Chromium version -------------------------------------------
 Write-Step "Resolving Chromium version for Playwright $PlaywrightVersion"
 
-# Try to read the revision from the installed playwright package first.
-$playwrightBrowsersJson = $null
+# Playwright's browsers.json contains a 'browserVersion' field with the exact
+# Chromium release string (e.g. "124.0.6367.78").  That string is a git tag
+# in the Chromium repo, so we can check it out directly.
+# The 'revision' field is Playwright's own internal build counter -- it is NOT
+# related to Chromium's commit positions and must NOT be used for git checkout.
+
+$chromiumVersion = $null
+
 try {
     $pipShow = python -m pip show playwright 2>$null
     if ($pipShow) {
         $location = ($pipShow | Select-String "Location:") -replace "Location:\s*",""
         $browsersJson = Join-Path $location.Trim() "playwright\driver\package\browsers.json"
         if (Test-Path $browsersJson) {
-            $playwrightBrowsersJson = Get-Content $browsersJson | ConvertFrom-Json
+            $json = Get-Content $browsersJson -Raw | ConvertFrom-Json
+            $entry = $json.browsers | Where-Object { $_.name -eq "chromium" }
+            if ($entry) {
+                # Try both field name spellings used across Playwright versions.
+                if ($entry.browserVersion) {
+                    $chromiumVersion = $entry.browserVersion
+                } elseif ($entry.browser_version) {
+                    $chromiumVersion = $entry.browser_version
+                }
+                if ($chromiumVersion) {
+                    Write-Host "  Found Chromium version from installed Playwright: $chromiumVersion"
+                }
+            }
         }
     }
 } catch {}
 
-$chromiumRevision = $null
-if ($playwrightBrowsersJson) {
-    $chromiumEntry = $playwrightBrowsersJson.browsers | Where-Object { $_.name -eq "chromium" }
-    if ($chromiumEntry) {
-        $chromiumRevision = $chromiumEntry.revision
-        Write-Host "  Found revision from installed Playwright: $chromiumRevision"
+if (-not $chromiumVersion) {
+    $chromiumVersion = $PLAYWRIGHT_CHROMIUM_VERSIONS[$PlaywrightVersion]
+    if (-not $chromiumVersion) {
+        Write-Host "  WARNING: Unknown Playwright version, defaulting to Chromium 124.0.6367.78"
+        $chromiumVersion = "124.0.6367.78"
     }
+    Write-Host "  Using Chromium version from lookup table: $chromiumVersion"
 }
 
-if (-not $chromiumRevision) {
-    $chromiumRevision = $PLAYWRIGHT_CHROMIUM_REVISIONS[$PlaywrightVersion]
-    if (-not $chromiumRevision) {
-        Write-Host "  WARNING: Unknown Playwright version, defaulting to revision 1225249 (Chromium 124)"
-        $chromiumRevision = "1225249"
-    }
-    Write-Host "  Using revision from lookup table: $chromiumRevision"
-}
-
-# Resolve to a Chromium git tag/branch if available.
-$chromiumTag = $CHROMIUM_TAGS[$chromiumRevision]
-$chromiumTagDisplay = if ($chromiumTag) { $chromiumTag } else { 'unknown (will use position)' }
-Write-Host "  Chromium tag       : $chromiumTagDisplay"
+Write-Host "  Chromium version   : $chromiumVersion"
 
 # --- 3. Fetch Chromium source ------------------------------------------------
 Write-Step "Fetching Chromium source (this may take 30-60 min on first run)"
@@ -182,29 +183,21 @@ if (-not (Test-Path $chromiumSrcDir)) {
     Write-Host "  Source already present."
 }
 
-# Check out the specific Chromium revision that matches Playwright.
+# Check out the specific Chromium release tag that matches Playwright.
+# Chromium tags are exactly the version string, e.g. "124.0.6367.78".
 Push-Location $chromiumSrcDir
-Write-Host "  Checking out Chromium revision $chromiumRevision..."
+Write-Host "  Checking out Chromium $chromiumVersion..."
 
-if ($chromiumTag) {
-    git fetch --tags origin "refs/tags/$chromiumTag" 2>&1 | Out-Null
-    git checkout "refs/tags/$chromiumTag"
-    if ($LASTEXITCODE -ne 0) { Fail "git checkout $chromiumTag failed" }
-} else {
-    # Revision is a Chromium commit-position number, not a tag.
-    # Use 'git log' to find the matching commit hash via the Cr-Commit-Position footer.
-    Write-Host "  No tag found; searching for commit at position $chromiumRevision..."
-    git fetch origin 2>&1 | Out-Null
-    $hash = git log --format="%H %s" origin/main |
-        Select-String "Cr-Commit-Position: refs/heads/main@\{#$chromiumRevision\}" |
-        Select-Object -First 1 | ForEach-Object { $_.Line.Split(' ')[0] }
-    if ($hash) {
-        git checkout $hash
-        if ($LASTEXITCODE -ne 0) { Fail "git checkout $hash failed" }
-    } else {
-        Write-Host "  WARNING: could not resolve position $chromiumRevision, staying on current HEAD."
-    }
+# Fetch the specific tag (much faster than fetching all tags).
+git fetch --depth=1 origin "refs/tags/$chromiumVersion`:refs/tags/$chromiumVersion" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    # Depth-limited fetch failed; fall back to a full tag fetch.
+    Write-Host "  Shallow fetch failed, trying full tag fetch..."
+    git fetch --tags origin 2>&1 | Out-Null
 }
+
+git checkout "refs/tags/$chromiumVersion" --
+if ($LASTEXITCODE -ne 0) { Fail "git checkout $chromiumVersion failed" }
 
 # Sync dependencies for the checked-out revision (third_party, BoringSSL, etc.).
 Write-Host "  Syncing dependencies for checked-out revision (~20-40 min)..."
