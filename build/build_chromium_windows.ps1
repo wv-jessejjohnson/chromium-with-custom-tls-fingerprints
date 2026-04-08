@@ -56,7 +56,7 @@ $SRC_DIR      = Join-Path $REPO_ROOT "src"
 $DIST_DIR     = Join-Path $REPO_ROOT "dist"
 $OUT_DIR      = Join-Path $SourceDir "src\out\CustomChromium"
 
-# ── Helper ──────────────────────────────────────────────────────────────────
+# --- Helper ------------------------------------------------------------------
 function Write-Step { param([string]$msg) Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Fail       { param([string]$msg) Write-Host "FATAL: $msg" -ForegroundColor Red; exit 1 }
 
@@ -68,7 +68,7 @@ function Require-Command {
     }
 }
 
-# ── Playwright → Chromium revision table ─────────────────────────────────────
+# --- Playwright -> Chromium revision table -----------------------------------
 # Maps Playwright versions to the Chromium git revision (cr_rev) they bundle.
 # Source: https://github.com/microsoft/playwright/blob/main/packages/playwright-core/browsers.json
 $PLAYWRIGHT_CHROMIUM_REVISIONS = @{
@@ -79,7 +79,7 @@ $PLAYWRIGHT_CHROMIUM_REVISIONS = @{
     "1.40.0" = "1204"    ;
 }
 
-# Chromium revision → branch/tag
+# Chromium revision -> branch/tag
 $CHROMIUM_TAGS = @{
     "1228965" = "125.0.6422.14";
     "1225249" = "124.0.6367.78";
@@ -92,7 +92,7 @@ Write-Host "  Source directory   : $SourceDir"
 Write-Host "  Output directory   : $OUT_DIR"
 Write-Host "  Parallel jobs      : $Jobs"
 
-# ── 1. Prerequisites ─────────────────────────────────────────────────────────
+# --- 1. Prerequisites --------------------------------------------------------
 Write-Step "Checking prerequisites"
 Require-Command "gclient"  "depot_tools"
 Require-Command "git"
@@ -101,7 +101,7 @@ if ($env:DEPOT_TOOLS_WIN_TOOLCHAIN -ne "0") {
     $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 }
 
-# ── 2. Determine Chromium version ────────────────────────────────────────────
+# --- 2. Determine Chromium version -------------------------------------------
 Write-Step "Resolving Chromium version for Playwright $PlaywrightVersion"
 
 # Try to read the revision from the installed playwright package first.
@@ -140,7 +140,7 @@ $chromiumTag = $CHROMIUM_TAGS[$chromiumRevision]
 $chromiumTagDisplay = if ($chromiumTag) { $chromiumTag } else { 'unknown (will use position)' }
 Write-Host "  Chromium tag       : $chromiumTagDisplay"
 
-# ── 3. Fetch Chromium source ─────────────────────────────────────────────────
+# --- 3. Fetch Chromium source ------------------------------------------------
 Write-Step "Fetching Chromium source (this may take 30-60 min on first run)"
 
 if (-not (Test-Path $SourceDir)) {
@@ -196,11 +196,11 @@ if ($LASTEXITCODE -ne 0) { Fail "gclient sync failed" }
 Pop-Location  # back to $SourceDir
 Pop-Location  # back to original
 
-# ── 4. Apply patches ─────────────────────────────────────────────────────────
+# --- 4. Apply patches --------------------------------------------------------
 Write-Step "Applying custom TLS fingerprint patches"
 $chromiumSrcDir = Join-Path $SourceDir "src"
 
-# ─ Chromium patches
+# Chromium patches
 $chromiumPatchDir = Join-Path $PATCHES_DIR "chromium"
 Get-ChildItem -Path $chromiumPatchDir -Filter "*.patch" | Sort-Object Name | ForEach-Object {
     Write-Host "  Applying $($_.Name)..."
@@ -213,7 +213,7 @@ Get-ChildItem -Path $chromiumPatchDir -Filter "*.patch" | Sort-Object Name | For
     Pop-Location
 }
 
-# ─ BoringSSL patches
+# BoringSSL patches
 $boringsslPatchDir = Join-Path $PATCHES_DIR "boringssl"
 $boringsslDir = Join-Path $chromiumSrcDir "third_party\boringssl\src"
 if (Test-Path $boringsslDir) {
@@ -229,7 +229,7 @@ if (Test-Path $boringsslDir) {
     }
 }
 
-# ── 5. Copy new source files ──────────────────────────────────────────────────
+# --- 5. Copy new source files ------------------------------------------------
 Write-Step "Copying new source files into Chromium tree"
 $filesToCopy = @(
     @{ Src = "src\chromium\net\ssl\tls_fingerprint_config.h";
@@ -249,7 +249,7 @@ foreach ($f in $filesToCopy) {
     Copy-Item $srcPath $dstPath -Force
 }
 
-# ── 6. Generate build ─────────────────────────────────────────────────────────
+# --- 6. Generate build -------------------------------------------------------
 Write-Step "Generating build with GN"
 Push-Location $chromiumSrcDir
 
@@ -269,8 +269,8 @@ if ($LASTEXITCODE -ne 0) { Fail "gn gen failed" }
 
 Pop-Location
 
-# ── 7. Build with Ninja ───────────────────────────────────────────────────────
-Write-Step "Building Chromium with Ninja ($Jobs jobs) — this takes 2-4 hours"
+# --- 7. Build with Ninja -----------------------------------------------------
+Write-Step "Building Chromium with Ninja ($Jobs jobs) - this takes 2-4 hours"
 Push-Location $chromiumSrcDir
 
 autoninja -C $OUT_DIR -j $Jobs chrome
@@ -278,7 +278,7 @@ if ($LASTEXITCODE -ne 0) { Fail "ninja build failed" }
 
 Pop-Location
 
-# ── 8. Copy outputs to dist/ ──────────────────────────────────────────────────
+# --- 8. Copy outputs to dist/ ------------------------------------------------
 Write-Step "Copying outputs to $DIST_DIR"
 if (-not (Test-Path $DIST_DIR)) { New-Item -ItemType Directory -Path $DIST_DIR | Out-Null }
 
@@ -311,8 +311,9 @@ if (Test-Path $localesDir) {
 }
 
 Write-Host "`n[SUCCESS] Build complete!" -ForegroundColor Green
-Write-Host "  Chromium binary : $DIST_DIR\chrome.exe" -ForegroundColor Green
-Write-Host ""
+$binPath = $DIST_DIR + '\chrome.exe'
+Write-Host "  Chromium binary : $binPath" -ForegroundColor Green
+Write-Host ''
 $exeDisplay = $DIST_DIR + '\chrome.exe'
 Write-Host '  Use with Playwright:'
 Write-Host '    from playwright_tls import BrowserWithTLS'

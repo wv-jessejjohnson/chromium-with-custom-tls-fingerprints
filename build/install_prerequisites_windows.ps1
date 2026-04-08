@@ -17,11 +17,11 @@ $ErrorActionPreference = 'Stop'
 
 $DEPOT_TOOLS_DIR = "C:\depot_tools"
 
-# ── Helper ──────────────────────────────────────────────────────────────────
+# --- Helper ------------------------------------------------------------------
 function Write-Step { param([string]$msg) Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Check-Command { param([string]$cmd) return [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
-# ── 1. Git ───────────────────────────────────────────────────────────────────
+# --- 1. Git ------------------------------------------------------------------
 Write-Step "Checking Git"
 if (-not (Check-Command "git")) {
     Write-Host "  Installing Git for Windows via winget..."
@@ -31,7 +31,7 @@ if (-not (Check-Command "git")) {
 }
 git --version
 
-# ── 2. Python 3 ─────────────────────────────────────────────────────────────
+# --- 2. Python 3 -------------------------------------------------------------
 Write-Step "Checking Python 3"
 if (-not (Check-Command "python3") -and -not (Check-Command "python")) {
     Write-Host "  Installing Python 3.11 via winget..."
@@ -41,14 +41,14 @@ if (-not (Check-Command "python3") -and -not (Check-Command "python")) {
 }
 python --version
 
-# ── 3. Visual Studio 2022 Build Tools ────────────────────────────────────────
+# --- 3. Visual Studio 2022 Build Tools ---------------------------------------
 Write-Step "Checking Visual Studio 2022 Build Tools"
-$vsInstallPath = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+$vsInstallPath  = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
 $vsInstallPath2 = "C:\Program Files\Microsoft Visual Studio\2022\Community"
 $vsInstallPath3 = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
 $vsInstallPath4 = "C:\Program Files\Microsoft Visual Studio\2022\Professional"
 
-$vsFound = (Test-Path $vsInstallPath) -or (Test-Path $vsInstallPath2) -or
+$vsFound = (Test-Path $vsInstallPath)  -or (Test-Path $vsInstallPath2) -or
            (Test-Path $vsInstallPath3) -or (Test-Path $vsInstallPath4)
 
 if (-not $vsFound) {
@@ -76,7 +76,7 @@ if (-not $vsFound) {
     Write-Host "  Visual Studio 2022 already present."
 }
 
-# ── 4. depot_tools ───────────────────────────────────────────────────────────
+# --- 4. depot_tools ----------------------------------------------------------
 Write-Step "Installing depot_tools to $DEPOT_TOOLS_DIR"
 if (-not (Test-Path $DEPOT_TOOLS_DIR)) {
     git clone "https://chromium.googlesource.com/chromium/tools/depot_tools.git" $DEPOT_TOOLS_DIR
@@ -101,7 +101,7 @@ if ($env:PATH -notlike "*$DEPOT_TOOLS_DIR*") {
 [System.Environment]::SetEnvironmentVariable("DEPOT_TOOLS_WIN_TOOLCHAIN", "0", "Machine")
 $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
-# ── 5. Verify gclient ────────────────────────────────────────────────────────
+# --- 5. Verify gclient -------------------------------------------------------
 Write-Step "Verifying gclient"
 gclient --version
 
