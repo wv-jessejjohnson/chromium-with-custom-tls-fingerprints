@@ -28,7 +28,7 @@ diff --git a/services/network/BUILD.gn b/services/network/BUILD.gn
 index aaaabbbb..ccccdddd 100644
 --- a/services/network/BUILD.gn
 +++ b/services/network/BUILD.gn
-@@ -200,6 +200,14 @@ component("network_service") {
+@@ -200,9 +200,17 @@ component("network_service") {
    sources = [
      # ... existing sources ...
 +    "tls_fingerprint_service_impl.cc",
@@ -39,23 +39,23 @@ index aaaabbbb..ccccdddd 100644
 +    "//net/ssl:ssl",  # for TLSFingerprintManager
    ]
  }
-
+ 
 +# Mojom for TLS fingerprint IPC
 +mojom("tls_fingerprint_mojom") {
 +  sources = [ "public/mojom/tls_fingerprint.mojom" ]
 +  public_deps = [ "//mojo/public/mojom/base" ]
 +}
-
+ 
 diff --git a/services/network/network_service.mojom b/services/network/public/mojom/network_service.mojom
 index eeeeffff..00001111 100644
 --- a/services/network/public/mojom/network_service.mojom
 +++ b/services/network/public/mojom/network_service.mojom
-@@ -10,6 +10,7 @@ import "services/network/public/mojom/network_context.mojom";
+@@ -10,8 +10,14 @@ import "services/network/public/mojom/network_context.mojom";
  import "services/network/public/mojom/network_types.mojom";
  import "services/network/public/mojom/url_loader.mojom";
  import "services/network/public/mojom/url_loader_factory.mojom";
 +import "services/network/public/mojom/tls_fingerprint.mojom";
-
+ 
  interface NetworkService {
    // ... existing methods ...
 +
@@ -64,14 +64,14 @@ index eeeeffff..00001111 100644
 +  BindTLSFingerprintService(
 +      pending_receiver<TLSFingerprintService> receiver);
  };
-
+ 
 diff --git a/services/network/network_service.h b/services/network/network_service.h
 index 22223333..44445555 100644
 --- a/services/network/network_service.h
 +++ b/services/network/network_service.h
-@@ -55,6 +55,13 @@ class NetworkService : public mojom::NetworkService {
+@@ -55,5 +55,12 @@ class NetworkService : public mojom::NetworkService {
    // ... existing declarations ...
-
+ 
 +  // mojom::NetworkService:
 +  void BindTLSFingerprintService(
 +      mojo::PendingReceiver<mojom::TLSFingerprintService> receiver) override;
@@ -81,17 +81,17 @@ index 22223333..44445555 100644
 +  mojo::Receiver<mojom::TLSFingerprintService>
 +      tls_fingerprint_receiver_{nullptr};
  };
-
+ 
 diff --git a/services/network/network_service.cc b/services/network/network_service.cc
 index 66667777..88889999 100644
 --- a/services/network/network_service.cc
 +++ b/services/network/network_service.cc
-@@ -30,6 +30,7 @@
+@@ -30,5 +30,17 @@
  #include "services/network/network_service.h"
 +#include "services/network/tls_fingerprint_service_impl.h"
-
+ 
  // ... existing code ...
-
+ 
 +void NetworkService::BindTLSFingerprintService(
 +    mojo::PendingReceiver<mojom::TLSFingerprintService> receiver) {
 +  if (!tls_fingerprint_service_) {
@@ -103,10 +103,10 @@ index 66667777..88889999 100644
 +        svc->tls_fingerprint_service_.reset();
 +      }, base::Unretained(this)));
 +}
-
+ 
 --- /dev/null
 +++ b/services/network/tls_fingerprint_service_impl.h
-@@ -0,0 +1,32 @@
+@@ -0,1 +1,27 @@
 +// Copyright 2024 The Chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +
@@ -133,10 +133,10 @@ index 66667777..88889999 100644
 +}  // namespace network
 +
 +#endif  // SERVICES_NETWORK_TLS_FINGERPRINT_SERVICE_IMPL_H_
-
+ 
 --- /dev/null
 +++ b/services/network/tls_fingerprint_service_impl.cc
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2024 The Chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +

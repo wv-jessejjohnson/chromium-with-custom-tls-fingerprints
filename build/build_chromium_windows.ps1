@@ -164,7 +164,10 @@ if (-not (Test-Path $gclientPath)) {
         '    "url": "https://chromium.googlesource.com/chromium/src.git",' + "`n" +
         '    "managed": False,' + "`n" +
         '    "custom_deps": {},' + "`n" +
-        '    "custom_vars": {},' + "`n" +
+        '    "custom_vars": {' + "`n" +
+        '        # Ensure ANGLE and its deps (including spirv-tools) are fetched.' + "`n" +
+        '        "checkout_angle": True,' + "`n" +
+        '    },' + "`n" +
         '  },' + "`n" +
         ']' + "`n" +
         'target_os = ["win"]' + "`n"
@@ -252,6 +255,30 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
 }
 $ErrorActionPreference = $savedPref
 if (-not $syncOk) { Fail "gclient sync failed after 3 attempts" }
+
+# Verify that third_party/spirv-tools was synced.  It is required by the root
+# BUILD.gn and is not always fetched on the first gclient sync attempt when the
+# server returns 429 rate-limit errors for individual deps.
+$spirvToolsDir = Join-Path $chromiumSrcDir "third_party\spirv-tools\src"
+if (-not (Test-Path $spirvToolsDir)) {
+    Write-Host "  third_party/spirv-tools not found — re-running gclient sync..."
+    $savedPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $retrySyncOk = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        gclient sync --no-history -D -j 4
+        if ($LASTEXITCODE -eq 0) { $retrySyncOk = $true; break }
+        if ($attempt -lt 3) {
+            Write-Host "  Retry $attempt/3 failed. Waiting 60 s..."
+            Start-Sleep -Seconds 60
+        }
+    }
+    $ErrorActionPreference = $savedPref
+    if (-not (Test-Path $spirvToolsDir)) {
+        Fail ("third_party/spirv-tools still missing after re-sync. " +
+              "Run 'gclient sync -j 4' manually from $SourceDir to fetch it.")
+    }
+}
 
 Pop-Location  # back to original
 

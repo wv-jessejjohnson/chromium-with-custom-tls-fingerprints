@@ -33,8 +33,8 @@ diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
 index aabbccdd..eeff0011 100644
 --- a/include/openssl/ssl.h
 +++ b/include/openssl/ssl.h
-@@ -2100,6 +2100,19 @@ OPENSSL_EXPORT int SSL_set_permute_extensions(SSL *ssl, int enabled);
-
+@@ -2100,2 +2100,15 @@ OPENSSL_EXPORT int SSL_set_permute_extensions(SSL *ssl, int enabled);
+ 
 +// SSL_set_extension_order configures a fixed ClientHello extension send order.
 +//
 +// |order| is an array of |num| IANA extension type values (uint16_t).
@@ -48,15 +48,15 @@ index aabbccdd..eeff0011 100644
 +OPENSSL_EXPORT int SSL_set_extension_order(SSL *ssl,
 +                                           const uint16_t *order,
 +                                           size_t num);
-
+ 
 diff --git a/ssl/internal.h b/ssl/internal.h
 index 11223344..55667788 100644
 --- a/ssl/internal.h
 +++ b/ssl/internal.h
-@@ -1850,6 +1850,14 @@ struct ssl_st {
+@@ -1850,5 +1850,13 @@ struct ssl_st {
    // permute_extensions, if true, causes extensions to be permuted.
    bool permute_extensions : 1;
-
+ 
 +  // custom_extension_order is the caller-specified extension send order.
 +  // NULL means use BoringSSL default order.
 +  uint16_t *custom_extension_order;
@@ -66,21 +66,21 @@ index 11223344..55667788 100644
 +  size_t custom_extension_order_len;
 +
  };
-
+ 
 diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
 index 99aabbcc..ddeeff00 100644
 --- a/ssl/ssl_lib.cc
 +++ b/ssl/ssl_lib.cc
-@@ -400,6 +400,8 @@ ssl_st::ssl_st(SSL_CTX *ctx)
+@@ -400,7 +400,27 @@ ssl_st::ssl_st(SSL_CTX *ctx)
    // ... existing constructor body ...
 +  custom_extension_order(nullptr),
 +  custom_extension_order_len(0),
-
+ 
  ssl_st::~ssl_st() {
    // ... existing destructor ...
 +  OPENSSL_free(custom_extension_order);
  }
-
+ 
 +int SSL_set_extension_order(SSL *ssl, const uint16_t *order, size_t num) {
 +  OPENSSL_free(ssl->custom_extension_order);
 +  ssl->custom_extension_order = nullptr;
@@ -98,12 +98,12 @@ index 99aabbcc..ddeeff00 100644
 +  ssl->custom_extension_order_len = num;
 +  return 1;
 +}
-
+ 
 diff --git a/ssl/extensions.cc b/ssl/extensions.cc
 index aabb1234..ccdd5678 100644
 --- a/ssl/extensions.cc
 +++ b/ssl/extensions.cc
-@@ -3100,6 +3100,76 @@ bool ssl_add_clienthello_tlsext(SSL_HANDSHAKE *hs, CBB *out,
+@@ -3100,4 +3100,49 @@ bool ssl_add_clienthello_tlsext(SSL_HANDSHAKE *hs, CBB *out,
                                   CBB *out_compressible,
                                   ssl_client_hello_type_t type) {
 +  // ── Custom extension order ───────────────────────────────────────────────
