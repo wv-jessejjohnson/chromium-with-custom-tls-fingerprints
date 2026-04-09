@@ -421,18 +421,19 @@ Pop-Location
 Write-Step "Building Chromium with Ninja ($Jobs jobs) - this takes 2-4 hours"
 Push-Location $chromiumSrcDir
 
-# autoninja may fail with a MIDL rebaseline error on the first run when the
-# machine's midl.exe version differs from the pre-committed expected outputs
-# in third_party/win_build_output/midl/.  When that happens, siso writes
-# "copy /y <tmpdir\*> <prebuilt-path>" rebaseline commands to siso_output.
-# We detect this, run the copy commands (paths are relative to OUT_DIR),
-# and retry the build once.  On any other failure we bail immediately.
+# autoninja may fail with MIDL rebaseline errors when the machine's midl.exe
+# version differs from the pre-committed expected outputs in
+# third_party/win_build_output/midl/.  Chromium has ~20-30 IDL files that may
+# each need rebaseline on first build; each autoninja run fixes the one(s) it
+# hits before stopping.  We loop: detect "copy /y" commands in siso_output,
+# run them, and retry.  Stop only on non-MIDL failures or build success.
 $ninjaOk = $false
-for ($ninjaAttempt = 1; $ninjaAttempt -le 2; $ninjaAttempt++) {
+$maxMidlRetries = 40  # More than enough for all IDL files in Chromium.
+for ($ninjaAttempt = 1; $ninjaAttempt -le ($maxMidlRetries + 1); $ninjaAttempt++) {
     autoninja -C $OUT_DIR -j $Jobs chrome
     if ($LASTEXITCODE -eq 0) { $ninjaOk = $true; break }
 
-    if ($ninjaAttempt -ge 2) { break }  # Already retried; give up.
+    if ($ninjaAttempt -gt $maxMidlRetries) { break }  # Exhausted retries.
 
     # Check siso_output for MIDL rebaseline instructions.
     $sisoOutputFile = Join-Path $OUT_DIR "siso_output"
@@ -441,10 +442,10 @@ for ($ninjaAttempt = 1; $ninjaAttempt -le 2; $ninjaAttempt++) {
     $sisoText = Get-Content $sisoOutputFile -Raw
     # midl.py prints: "copy /y C:\...\tmpXXX\* ..\..\third_party\win_build_output\..."
     $copyMatches = [regex]::Matches($sisoText, '(?m)copy /y\s+\S+\s+\S+')
-    if ($copyMatches.Count -eq 0) { break }  # Not a MIDL failure.
+    if ($copyMatches.Count -eq 0) { break }  # Not a MIDL failure - bail.
 
-    Write-Host "  MIDL output mismatch ($($copyMatches.Count) target(s)) - rebaselining and retrying..."
-    # Copy commands use paths relative to OUT_DIR (..\..\third_party\...).
+    Write-Host "  MIDL rebaseline (attempt $ninjaAttempt, $($copyMatches.Count) target(s))..."
+    # Copy commands use paths relative to OUT_DIR (e.g. ..\..\third_party\...).
     Push-Location $OUT_DIR
     foreach ($m in $copyMatches) {
         $copyCmd = $m.Value.Trim()
@@ -452,7 +453,7 @@ for ($ninjaAttempt = 1; $ninjaAttempt -le 2; $ninjaAttempt++) {
         cmd /c $copyCmd
     }
     Pop-Location
-    Write-Host "  Rebaseline done - retrying build..."
+    Write-Host "  Retrying build..."
 }
 
 if (-not $ninjaOk) { Fail "ninja build failed" }
