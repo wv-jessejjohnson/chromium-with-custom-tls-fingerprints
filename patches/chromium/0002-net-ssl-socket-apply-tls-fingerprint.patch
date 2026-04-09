@@ -39,19 +39,19 @@ index 11111111..22222222 100644
  #include "third_party/boringssl/src/include/openssl/evp.h"
  #include "third_party/boringssl/src/include/openssl/ssl.h"
 +#include "third_party/boringssl/src/include/openssl/tls1.h"
-
+ 
  namespace net {
-
-@@ -150,6 +152,11 @@ int SSLClientSocketImpl::Init() {
+ 
+@@ -150,6 +152,87 @@ int SSLClientSocketImpl::Init() {
    // ... (existing SSL_new and basic setup) ...
-
+ 
 +  // ── Custom TLS Fingerprint ──────────────────────────────────────────────
 +  ApplyTLSFingerprintIfEnabled();
 +  // ───────────────────────────────────────────────────────────────────────
 +
    return OK;
  }
-
+ 
 +void SSLClientSocketImpl::ApplyTLSFingerprintIfEnabled() {
 +  TLSFingerprintManager* mgr = TLSFingerprintManager::GetInstance();
 +  if (!mgr->IsEnabled()) {
@@ -129,14 +129,14 @@ index 11111111..22222222 100644
 +    }
 +  }
 +}
-
+ 
 diff --git a/net/socket/ssl_client_socket_impl.h b/net/socket/ssl_client_socket_impl.h
 index 33333333..44444444 100644
 --- a/net/socket/ssl_client_socket_impl.h
 +++ b/net/socket/ssl_client_socket_impl.h
-@@ -120,6 +120,10 @@ class SSLClientSocketImpl : public SSLClientSocket,
+@@ -120,3 +120,7 @@ class SSLClientSocketImpl : public SSLClientSocket,
    // ... existing declarations ...
-
+ 
 +  // Reads TLSFingerprintManager and applies custom TLS settings to ssl_.
 +  // Called at the end of Init(), a no-op if no fingerprint is configured.
 +  void ApplyTLSFingerprintIfEnabled();

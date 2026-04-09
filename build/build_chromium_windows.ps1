@@ -164,7 +164,10 @@ if (-not (Test-Path $gclientPath)) {
         '    "url": "https://chromium.googlesource.com/chromium/src.git",' + "`n" +
         '    "managed": False,' + "`n" +
         '    "custom_deps": {},' + "`n" +
-        '    "custom_vars": {},' + "`n" +
+        '    "custom_vars": {' + "`n" +
+        '        # Ensure ANGLE and its deps (including spirv-tools) are fetched.' + "`n" +
+        '        "checkout_angle": True,' + "`n" +
+        '    },' + "`n" +
         '  },' + "`n" +
         ']' + "`n" +
         'target_os = ["win"]' + "`n"
@@ -253,6 +256,92 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
 $ErrorActionPreference = $savedPref
 if (-not $syncOk) { Fail "gclient sync failed after 3 attempts" }
 
+# Verify that third_party/spirv-tools/src/BUILD.gn is present.
+# gclient can leave the directory empty when a CIPD download fails silently.
+# Fallback: use Python to parse the revision from Chromium's own DEPS file,
+# then do a targeted shallow git clone at exactly that commit.
+$spirvToolsDir = Join-Path $chromiumSrcDir "third_party\spirv-tools\src"
+if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
+    Write-Host "  third_party/spirv-tools/src/BUILD.gn missing - running git fallback..."
+
+    # Remove any empty/incomplete directory left behind by gclient.
+    if (Test-Path $spirvToolsDir) {
+        Write-Host "  Removing incomplete spirv-tools directory..."
+        Remove-Item -Recurse -Force $spirvToolsDir
+    }
+
+    # Use Python to extract the revision from DEPS.
+    # Handles all known formats: named var, inline URL @hash, CIPD git_revision:.
+    $depsFile = Join-Path $chromiumSrcDir "DEPS"
+    $spirvRev = $null
+    if (Test-Path $depsFile) {
+        # Write a small helper script to a temp file (avoids quoting nightmares).
+        $pyTmp = [System.IO.Path]::GetTempFileName() + ".py"
+        $pyCode = @'
+import re, sys
+with open(sys.argv[1], encoding='utf-8', errors='replace') as fh:
+    text = fh.read()
+checks = [
+    r"'spirv_tools_revision'\s*:\s*'([^']+)'",
+    r'"spirv_tools_revision"\s*:\s*"([^"]+)"',
+    r"spirv-tools\.git@([0-9a-fA-F]{40})",
+    r"spirv-tools\.git@(v[0-9][^\s'\"]+)",
+]
+for pat in checks:
+    m = re.search(pat, text)
+    if m:
+        print(m.group(1).strip())
+        sys.exit(0)
+# CIPD format: look for git_revision inside the spirv-tools block
+block = re.search(
+    r"['\"]src/third_party/spirv-tools[^'\"]*['\"].*?(?=\n\s*['\"]src/|\Z)",
+    text, re.DOTALL)
+if block:
+    m = re.search(r"git_revision:([0-9a-fA-F]{40})", block.group(0))
+    if m:
+        print(m.group(1).strip())
+        sys.exit(0)
+'@
+        [System.IO.File]::WriteAllText($pyTmp, $pyCode, [System.Text.Encoding]::ASCII)
+        $spirvRev = (python $pyTmp $depsFile 2>$null)
+        Remove-Item $pyTmp -ErrorAction SilentlyContinue
+        if ($spirvRev) { $spirvRev = $spirvRev.Trim() }
+    }
+
+    $spirvUrl    = "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Tools.git"
+    $spirvParent = Split-Path $spirvToolsDir -Parent
+    if (-not (Test-Path $spirvParent)) {
+        New-Item -ItemType Directory -Path $spirvParent | Out-Null
+    }
+
+    $savedPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+
+    if ($spirvRev -and $spirvRev -match '^[0-9a-fA-F]{40}$') {
+        Write-Host "  Fetching spirv-tools @ $spirvRev ..."
+        git init $spirvToolsDir
+        Push-Location $spirvToolsDir
+        git remote add origin $spirvUrl
+        git fetch --depth 1 origin $spirvRev
+        git checkout FETCH_HEAD
+        Pop-Location
+    } elseif ($spirvRev) {
+        Write-Host "  Cloning spirv-tools --branch $spirvRev ..."
+        git clone $spirvUrl --branch $spirvRev --depth 1 $spirvToolsDir
+    } else {
+        Write-Host "  WARNING: revision not found in DEPS; cloning latest HEAD..."
+        git clone $spirvUrl --depth 1 $spirvToolsDir
+    }
+
+    $ErrorActionPreference = $savedPref
+
+    if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
+        Fail ("spirv-tools clone failed.  " +
+              "Run 'gclient sync -j 4' manually from $SourceDir then retry.")
+    }
+    Write-Host "  spirv-tools ready."
+}
+
 Pop-Location  # back to original
 
 # --- 4. Apply patches --------------------------------------------------------
@@ -332,8 +421,42 @@ Pop-Location
 Write-Step "Building Chromium with Ninja ($Jobs jobs) - this takes 2-4 hours"
 Push-Location $chromiumSrcDir
 
-autoninja -C $OUT_DIR -j $Jobs chrome
-if ($LASTEXITCODE -ne 0) { Fail "ninja build failed" }
+# autoninja may fail with MIDL rebaseline errors when the machine's midl.exe
+# version differs from the pre-committed expected outputs in
+# third_party/win_build_output/midl/.  Chromium has ~20-30 IDL files that may
+# each need rebaseline on first build; each autoninja run fixes the one(s) it
+# hits before stopping.  We loop: detect "copy /y" commands in siso_output,
+# run them, and retry.  Stop only on non-MIDL failures or build success.
+$ninjaOk = $false
+$maxMidlRetries = 40  # More than enough for all IDL files in Chromium.
+for ($ninjaAttempt = 1; $ninjaAttempt -le ($maxMidlRetries + 1); $ninjaAttempt++) {
+    autoninja -C $OUT_DIR -j $Jobs chrome
+    if ($LASTEXITCODE -eq 0) { $ninjaOk = $true; break }
+
+    if ($ninjaAttempt -gt $maxMidlRetries) { break }  # Exhausted retries.
+
+    # Check siso_output for MIDL rebaseline instructions.
+    $sisoOutputFile = Join-Path $OUT_DIR "siso_output"
+    if (-not (Test-Path $sisoOutputFile)) { break }  # Not a siso build.
+
+    $sisoText = Get-Content $sisoOutputFile -Raw
+    # midl.py prints: "copy /y C:\...\tmpXXX\* ..\..\third_party\win_build_output\..."
+    $copyMatches = [regex]::Matches($sisoText, '(?m)copy /y\s+\S+\s+\S+')
+    if ($copyMatches.Count -eq 0) { break }  # Not a MIDL failure - bail.
+
+    Write-Host "  MIDL rebaseline (attempt $ninjaAttempt, $($copyMatches.Count) target(s))..."
+    # Copy commands use paths relative to OUT_DIR (e.g. ..\..\third_party\...).
+    Push-Location $OUT_DIR
+    foreach ($m in $copyMatches) {
+        $copyCmd = $m.Value.Trim()
+        Write-Host "    $copyCmd"
+        cmd /c $copyCmd
+    }
+    Pop-Location
+    Write-Host "  Retrying build..."
+}
+
+if (-not $ninjaOk) { Fail "ninja build failed" }
 
 Pop-Location
 

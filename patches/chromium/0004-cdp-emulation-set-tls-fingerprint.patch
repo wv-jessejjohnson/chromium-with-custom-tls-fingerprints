@@ -24,10 +24,10 @@ diff --git a/third_party/blink/public/devtools_protocol/browser_protocol.pdl b/t
 index aaaabbbb..ccccdddd 100644
 --- a/third_party/blink/public/devtools_protocol/browser_protocol.pdl
 +++ b/third_party/blink/public/devtools_protocol/browser_protocol.pdl
-@@ -2800,6 +2800,54 @@ domain Emulation
+@@ -2800,4 +2800,41 @@ domain Emulation
        # Allows overriding the automation flag.
        optional boolean enable
-
+ 
 +  # Sets a custom TLS ClientHello fingerprint for all new connections.
 +  # Remains active until resetTLSFingerprint is called or the browser is closed.
 +  #
@@ -65,14 +65,14 @@ index aaaabbbb..ccccdddd 100644
 +  # Resets the TLS fingerprint to Chromium defaults, undoing setTLSFingerprint.
 +  # EXPERIMENTAL
 +  experimental command resetTLSFingerprint
-
+ 
 diff --git a/content/browser/devtools/protocol/emulation_handler.h b/content/browser/devtools/protocol/emulation_handler.h
 index 11112222..33334444 100644
 --- a/content/browser/devtools/protocol/emulation_handler.h
 +++ b/content/browser/devtools/protocol/emulation_handler.h
-@@ -80,6 +80,16 @@ class EmulationHandler : public DevToolsDomainHandler,
+@@ -80,4 +80,17 @@ class EmulationHandler : public DevToolsDomainHandler,
    // ... existing declarations ...
-
+ 
 +  // Emulation.setTLSFingerprint
 +  protocol::Response SetTLSFingerprint(
 +      protocol::Maybe<std::string> ja3_string,
@@ -87,21 +87,21 @@ index 11112222..33334444 100644
 +  protocol::Response ResetTLSFingerprint() override;
 +
   private:
-
+ 
 diff --git a/content/browser/devtools/protocol/emulation_handler.cc b/content/browser/devtools/protocol/emulation_handler.cc
 index 55556666..77778888 100644
 --- a/content/browser/devtools/protocol/emulation_handler.cc
 +++ b/content/browser/devtools/protocol/emulation_handler.cc
-@@ -35,6 +35,7 @@
+@@ -35,7 +35,106 @@
  #include "content/browser/renderer_host/render_frame_host_impl.h"
  #include "content/public/browser/browser_thread.h"
  #include "content/public/browser/web_contents.h"
 +#include "net/ssl/tls_fingerprint_config.h"
 +#include "services/network/public/mojom/tls_fingerprint.mojom.h"
-
+ 
  namespace content {
  namespace protocol {
-
+ 
 +// ── Emulation.setTLSFingerprint ─────────────────────────────────────────────
 +
 +protocol::Response EmulationHandler::SetTLSFingerprint(

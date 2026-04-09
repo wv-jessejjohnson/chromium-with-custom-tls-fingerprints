@@ -15,7 +15,7 @@ diff --git a/net/ssl/BUILD.gn b/net/ssl/BUILD.gn
 index abc12345..def67890 100644
 --- a/net/ssl/BUILD.gn
 +++ b/net/ssl/BUILD.gn
-@@ -30,6 +30,12 @@ component("ssl") {
+@@ -30,6 +30,9 @@ component("ssl") {
    sources = [
      "client_cert_identity.cc",
      "client_cert_identity.h",
