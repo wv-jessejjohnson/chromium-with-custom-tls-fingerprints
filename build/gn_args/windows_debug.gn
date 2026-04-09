@@ -1,0 +1,21 @@
+# GN args for a Windows x64 debug build.
+# Useful for verifying the fingerprint patches with DVLOG output.
+# Binary is ~2x larger and ~5-10x slower than release.
+
+is_official_build = false
+is_component_build = true
+is_debug = true
+
+target_cpu = "x64"
+target_os = "win"
+
+chrome_pgo_phase = 0
+symbol_level = 1   # function-level symbols
+enable_nacl = false
+enable_remoting = false
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"
+use_sandbox = true
+
+# Enable DCHECK and DVLOG(1) so fingerprint application is logged.
+dcheck_always_on = true

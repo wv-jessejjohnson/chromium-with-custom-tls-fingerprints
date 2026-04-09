@@ -1,0 +1,42 @@
+# GN args for a Windows x64 release build of custom Chromium.
+# Used by build_chromium_windows.ps1 (written to out/CustomChromium/args.gn).
+#
+# Key trade-offs from a full official build:
+#   - chrome_pgo_phase=0   : skip PGO profiling (saves ~1-2 h, ~5-10% perf loss)
+#   - symbol_level=0       : no debug symbols (saves ~10 GB disk, faster link)
+#   - is_component_build=false : single monolithic chrome.dll (required for dist)
+
+is_official_build = true
+is_component_build = false
+is_debug = false
+
+# Target architecture
+target_cpu = "x64"
+target_os = "win"
+
+# Skip profile-guided optimisation for faster builds.
+chrome_pgo_phase = 0
+
+# Minimal symbols (none in binary; no .pdb needed for distribution).
+symbol_level = 0
+enable_full_stack_frames_for_profiling = false
+
+# Disable unused features to reduce binary size and build time.
+enable_nacl = false
+enable_remoting = false
+enable_pdf = true
+enable_printing = true
+use_thin_lto = false
+
+# Disable proprietary codecs (use false to include H.264 etc. if licenced).
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"
+
+# Disable crash reporting.
+use_crashpad_handler_in_process = false
+
+# Sandbox (keep enabled for security).
+use_sandbox = true
+
+# Treat our custom fingerprint files as part of the build.
+# (They are already added to net/ssl/BUILD.gn by patch 0001.)

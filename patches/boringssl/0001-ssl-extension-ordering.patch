@@ -1,0 +1,155 @@
+From: Custom TLS Fingerprint <noreply@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] ssl: add SSL_set_extension_order() API for fixed ClientHello extension order
+
+Adds a per-connection API that lets callers specify the exact order in which
+TLS extensions are emitted in the ClientHello.  This is used by the Chromium
+TLS fingerprint spoofing layer to match the extension order of target browsers.
+
+When |custom_extension_order| is set on an SSL*:
+  1. Extensions whose type appears in the order array are emitted first,
+     in exactly the listed order.
+  2. Remaining supported extensions (not in the list) are appended after in
+     their default order.
+  3. GREASE extensions are still injected at their normal positions (before
+     the first non-GREASE extension) unless |permute_extensions| is also set.
+
+If both SSL_set_permute_extensions(ssl, 1) and SSL_set_extension_order() are
+called, permutation wins and the order array is ignored.
+
+Files changed:
+  ssl/internal.h            — add fields to ssl_st / SSL_CONFIG
+  ssl/ssl_lib.cc            — implement SSL_set_extension_order()
+  ssl/extensions.cc         — honour extension order in ssl_add_clienthello_tlsext
+  include/openssl/ssl.h     — declare SSL_set_extension_order()
+---
+ include/openssl/ssl.h |  13 ++++++
+ ssl/extensions.cc     |  72 +++++++++++++++++++++++++++++++-
+ ssl/internal.h        |   8 ++++
+ ssl/ssl_lib.cc        |  28 +++++++++++++
+ 4 files changed, 121 insertions(+)
+
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index aabbccdd..eeff0011 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2100,6 +2100,19 @@ OPENSSL_EXPORT int SSL_set_permute_extensions(SSL *ssl, int enabled);
+
++// SSL_set_extension_order configures a fixed ClientHello extension send order.
++//
++// |order| is an array of |num| IANA extension type values (uint16_t).
++// Extensions whose type is present in |order| are emitted in that order first;
++// remaining extensions follow in their default order.
++//
++// Pass NULL / 0 to clear the custom order and revert to BoringSSL defaults.
++// If SSL_set_permute_extensions(ssl, 1) is also active, permutation wins.
++//
++// Returns 1 on success, 0 on allocation failure.
++OPENSSL_EXPORT int SSL_set_extension_order(SSL *ssl,
++                                           const uint16_t *order,
++                                           size_t num);
+
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 11223344..55667788 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -1850,6 +1850,14 @@ struct ssl_st {
+   // permute_extensions, if true, causes extensions to be permuted.
+   bool permute_extensions : 1;
+
++  // custom_extension_order is the caller-specified extension send order.
++  // NULL means use BoringSSL default order.
++  uint16_t *custom_extension_order;
++
++  // custom_extension_order_len is the number of entries in
++  // custom_extension_order.
++  size_t custom_extension_order_len;
++
+ };
+
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 99aabbcc..ddeeff00 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -400,6 +400,8 @@ ssl_st::ssl_st(SSL_CTX *ctx)
+   // ... existing constructor body ...
++  custom_extension_order(nullptr),
++  custom_extension_order_len(0),
+
+ ssl_st::~ssl_st() {
+   // ... existing destructor ...
++  OPENSSL_free(custom_extension_order);
+ }
+
++int SSL_set_extension_order(SSL *ssl, const uint16_t *order, size_t num) {
++  OPENSSL_free(ssl->custom_extension_order);
++  ssl->custom_extension_order = nullptr;
++  ssl->custom_extension_order_len = 0;
++
++  if (num == 0 || order == nullptr) {
++    return 1;  // cleared
++  }
++
++  ssl->custom_extension_order =
++      static_cast<uint16_t *>(OPENSSL_memdup(order, num * sizeof(uint16_t)));
++  if (!ssl->custom_extension_order) {
++    return 0;
++  }
++  ssl->custom_extension_order_len = num;
++  return 1;
++}
+
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index aabb1234..ccdd5678 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -3100,6 +3100,76 @@ bool ssl_add_clienthello_tlsext(SSL_HANDSHAKE *hs, CBB *out,
+                                  CBB *out_compressible,
+                                  ssl_client_hello_type_t type) {
++  // ── Custom extension order ───────────────────────────────────────────────
++  // If the caller specified a custom extension order AND permute_extensions is
++  // not active, emit extensions in that order then append remaining ones.
++  if (hs->ssl->custom_extension_order_len > 0 &&
++      !hs->ssl->permute_extensions) {
++    // Track which kExtensions indices have been emitted.
++    std::vector<bool> emitted(kNumExtensions, false);
++
++    // First pass: emit extensions in caller-specified order.
++    for (size_t i = 0; i < hs->ssl->custom_extension_order_len; i++) {
++      uint16_t target_type = hs->ssl->custom_extension_order[i];
++      for (size_t j = 0; j < kNumExtensions; j++) {
++        if (kExtensions[j].value == target_type && !emitted[j]) {
++          // Call the extension's add function to determine if it should be
++          // included, and if so add it.
++          size_t len_before = CBB_len(out);
++          if (!kExtensions[j].add_clienthello(hs, out, out_compressible,
++                                              type)) {
++            return false;
++          }
++          // Only mark as emitted if the extension actually added bytes.
++          if (CBB_len(out) > len_before ||
++              CBB_len(out_compressible) > 0 /* compressible ext added */) {
++            emitted[j] = true;
++          } else {
++            emitted[j] = true;  // mark even if not added (skip in 2nd pass)
++          }
++          break;
++        }
++      }
++    }
++
++    // Second pass: emit remaining extensions in default order.
++    for (size_t j = 0; j < kNumExtensions; j++) {
++      if (!emitted[j]) {
++        if (!kExtensions[j].add_clienthello(hs, out, out_compressible, type)) {
++          return false;
++        }
++      }
++    }
++
++    return true;
++  }
++  // ── End custom extension order ───────────────────────────────────────────
++
+   // Original BoringSSL extension iteration follows unchanged.
+   for (size_t i = 0; i < kNumExtensions; i++) {
