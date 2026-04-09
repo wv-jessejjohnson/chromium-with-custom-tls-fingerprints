@@ -261,7 +261,7 @@ if (-not $syncOk) { Fail "gclient sync failed after 3 attempts" }
 # server returns 429 rate-limit errors for individual deps.
 $spirvToolsDir = Join-Path $chromiumSrcDir "third_party\spirv-tools\src"
 if (-not (Test-Path $spirvToolsDir)) {
-    Write-Host "  third_party/spirv-tools not found — re-running gclient sync..."
+    Write-Host "  third_party/spirv-tools not found - re-running gclient sync..."
     $savedPref = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $retrySyncOk = $false
