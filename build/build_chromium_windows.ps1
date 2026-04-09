@@ -256,28 +256,56 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
 $ErrorActionPreference = $savedPref
 if (-not $syncOk) { Fail "gclient sync failed after 3 attempts" }
 
-# Verify that third_party/spirv-tools/src is present.  It is required by
-# Chromium's root BUILD.gn.  gclient sometimes skips it when CIPD downloads
-# fail silently.  As a fallback we read the exact revision from the already-
-# checked-out DEPS file and clone it directly via git.
+# Verify that third_party/spirv-tools/src/BUILD.gn is present.
+# gclient can leave the directory empty when a CIPD download fails silently.
+# Fallback: use Python to parse the revision from Chromium's own DEPS file,
+# then do a targeted shallow git clone at exactly that commit.
 $spirvToolsDir = Join-Path $chromiumSrcDir "third_party\spirv-tools\src"
 if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
-    Write-Host "  third_party/spirv-tools not found - fetching via git fallback..."
+    Write-Host "  third_party/spirv-tools/src/BUILD.gn missing - running git fallback..."
 
-    # Read the required revision from Chromium's DEPS file.
-    $depsFile  = Join-Path $chromiumSrcDir "DEPS"
-    $spirvRev  = $null
+    # Remove any empty/incomplete directory left behind by gclient.
+    if (Test-Path $spirvToolsDir) {
+        Write-Host "  Removing incomplete spirv-tools directory..."
+        Remove-Item -Recurse -Force $spirvToolsDir
+    }
+
+    # Use Python to extract the revision from DEPS.
+    # Handles all known formats: named var, inline URL @hash, CIPD git_revision:.
+    $depsFile = Join-Path $chromiumSrcDir "DEPS"
+    $spirvRev = $null
     if (Test-Path $depsFile) {
-        $depsText = Get-Content $depsFile -Raw
-        # DEPS stores the revision either as a named variable ...
-        $m = [regex]::Match($depsText, "'spirv_tools_revision'\s*:\s*'([^']+)'")
-        if ($m.Success) {
-            $spirvRev = $m.Groups[1].Value
-        } else {
-            # ... or inline in the URL after the @ sign.
-            $m2 = [regex]::Match($depsText, "spirv-tools\.git@([a-f0-9A-F]{40})")
-            if ($m2.Success) { $spirvRev = $m2.Groups[1].Value }
-        }
+        # Write a small helper script to a temp file (avoids quoting nightmares).
+        $pyTmp = [System.IO.Path]::GetTempFileName() + ".py"
+        $pyCode = @'
+import re, sys
+with open(sys.argv[1], encoding='utf-8', errors='replace') as fh:
+    text = fh.read()
+checks = [
+    r"'spirv_tools_revision'\s*:\s*'([^']+)'",
+    r'"spirv_tools_revision"\s*:\s*"([^"]+)"',
+    r"spirv-tools\.git@([0-9a-fA-F]{40})",
+    r"spirv-tools\.git@(v[0-9][^\s'\"]+)",
+]
+for pat in checks:
+    m = re.search(pat, text)
+    if m:
+        print(m.group(1).strip())
+        sys.exit(0)
+# CIPD format: look for git_revision inside the spirv-tools block
+block = re.search(
+    r"['\"]src/third_party/spirv-tools[^'\"]*['\"].*?(?=\n\s*['\"]src/|\Z)",
+    text, re.DOTALL)
+if block:
+    m = re.search(r"git_revision:([0-9a-fA-F]{40})", block.group(0))
+    if m:
+        print(m.group(1).strip())
+        sys.exit(0)
+'@
+        [System.IO.File]::WriteAllText($pyTmp, $pyCode, [System.Text.Encoding]::ASCII)
+        $spirvRev = (python $pyTmp $depsFile 2>$null)
+        Remove-Item $pyTmp -ErrorAction SilentlyContinue
+        if ($spirvRev) { $spirvRev = $spirvRev.Trim() }
     }
 
     $spirvUrl    = "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Tools.git"
@@ -289,9 +317,8 @@ if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
     $savedPref = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
 
-    if ($spirvRev -and $spirvRev -match '^[a-f0-9A-F]{40}$') {
-        # Specific commit hash: use a shallow fetch of exactly that commit.
-        Write-Host "  git init + fetch $spirvRev ..."
+    if ($spirvRev -and $spirvRev -match '^[0-9a-fA-F]{40}$') {
+        Write-Host "  Fetching spirv-tools @ $spirvRev ..."
         git init $spirvToolsDir
         Push-Location $spirvToolsDir
         git remote add origin $spirvUrl
@@ -299,11 +326,10 @@ if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
         git checkout FETCH_HEAD
         Pop-Location
     } elseif ($spirvRev) {
-        # Tag / branch name (e.g. "vulkan-sdk-1.3.275.0").
-        Write-Host "  git clone --branch $spirvRev ..."
+        Write-Host "  Cloning spirv-tools --branch $spirvRev ..."
         git clone $spirvUrl --branch $spirvRev --depth 1 $spirvToolsDir
     } else {
-        Write-Host "  WARNING: spirv-tools revision not found in DEPS; cloning HEAD..."
+        Write-Host "  WARNING: revision not found in DEPS; cloning latest HEAD..."
         git clone $spirvUrl --depth 1 $spirvToolsDir
     }
 
@@ -311,7 +337,7 @@ if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
 
     if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
         Fail ("spirv-tools clone failed.  " +
-              "Run 'gclient sync -j 4' manually from $SourceDir and retry.")
+              "Run 'gclient sync -j 4' manually from $SourceDir then retry.")
     }
     Write-Host "  spirv-tools ready."
 }
