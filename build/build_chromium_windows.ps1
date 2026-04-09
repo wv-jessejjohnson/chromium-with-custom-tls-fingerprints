@@ -256,28 +256,64 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
 $ErrorActionPreference = $savedPref
 if (-not $syncOk) { Fail "gclient sync failed after 3 attempts" }
 
-# Verify that third_party/spirv-tools was synced.  It is required by the root
-# BUILD.gn and is not always fetched on the first gclient sync attempt when the
-# server returns 429 rate-limit errors for individual deps.
+# Verify that third_party/spirv-tools/src is present.  It is required by
+# Chromium's root BUILD.gn.  gclient sometimes skips it when CIPD downloads
+# fail silently.  As a fallback we read the exact revision from the already-
+# checked-out DEPS file and clone it directly via git.
 $spirvToolsDir = Join-Path $chromiumSrcDir "third_party\spirv-tools\src"
-if (-not (Test-Path $spirvToolsDir)) {
-    Write-Host "  third_party/spirv-tools not found - re-running gclient sync..."
-    $savedPref = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $retrySyncOk = $false
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        gclient sync --no-history -D -j 4
-        if ($LASTEXITCODE -eq 0) { $retrySyncOk = $true; break }
-        if ($attempt -lt 3) {
-            Write-Host "  Retry $attempt/3 failed. Waiting 60 s..."
-            Start-Sleep -Seconds 60
+if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
+    Write-Host "  third_party/spirv-tools not found - fetching via git fallback..."
+
+    # Read the required revision from Chromium's DEPS file.
+    $depsFile  = Join-Path $chromiumSrcDir "DEPS"
+    $spirvRev  = $null
+    if (Test-Path $depsFile) {
+        $depsText = Get-Content $depsFile -Raw
+        # DEPS stores the revision either as a named variable ...
+        $m = [regex]::Match($depsText, "'spirv_tools_revision'\s*:\s*'([^']+)'")
+        if ($m.Success) {
+            $spirvRev = $m.Groups[1].Value
+        } else {
+            # ... or inline in the URL after the @ sign.
+            $m2 = [regex]::Match($depsText, "spirv-tools\.git@([a-f0-9A-F]{40})")
+            if ($m2.Success) { $spirvRev = $m2.Groups[1].Value }
         }
     }
-    $ErrorActionPreference = $savedPref
-    if (-not (Test-Path $spirvToolsDir)) {
-        Fail ("third_party/spirv-tools still missing after re-sync. " +
-              "Run 'gclient sync -j 4' manually from $SourceDir to fetch it.")
+
+    $spirvUrl    = "https://chromium.googlesource.com/external/github.com/KhronosGroup/SPIRV-Tools.git"
+    $spirvParent = Split-Path $spirvToolsDir -Parent
+    if (-not (Test-Path $spirvParent)) {
+        New-Item -ItemType Directory -Path $spirvParent | Out-Null
     }
+
+    $savedPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+
+    if ($spirvRev -and $spirvRev -match '^[a-f0-9A-F]{40}$') {
+        # Specific commit hash: use a shallow fetch of exactly that commit.
+        Write-Host "  git init + fetch $spirvRev ..."
+        git init $spirvToolsDir
+        Push-Location $spirvToolsDir
+        git remote add origin $spirvUrl
+        git fetch --depth 1 origin $spirvRev
+        git checkout FETCH_HEAD
+        Pop-Location
+    } elseif ($spirvRev) {
+        # Tag / branch name (e.g. "vulkan-sdk-1.3.275.0").
+        Write-Host "  git clone --branch $spirvRev ..."
+        git clone $spirvUrl --branch $spirvRev --depth 1 $spirvToolsDir
+    } else {
+        Write-Host "  WARNING: spirv-tools revision not found in DEPS; cloning HEAD..."
+        git clone $spirvUrl --depth 1 $spirvToolsDir
+    }
+
+    $ErrorActionPreference = $savedPref
+
+    if (-not (Test-Path (Join-Path $spirvToolsDir "BUILD.gn"))) {
+        Fail ("spirv-tools clone failed.  " +
+              "Run 'gclient sync -j 4' manually from $SourceDir and retry.")
+    }
+    Write-Host "  spirv-tools ready."
 }
 
 Pop-Location  # back to original
