@@ -464,32 +464,77 @@ Pop-Location
 Write-Step "Copying outputs to $DIST_DIR"
 if (-not (Test-Path $DIST_DIR)) { New-Item -ItemType Directory -Path $DIST_DIR | Out-Null }
 
-$filesToDist = @(
-    "chrome.exe",
-    "chrome.dll",
-    "chrome_elf.dll",
-    "chrome_100_percent.pak",
-    "chrome_200_percent.pak",
-    "resources.pak",
-    "icudtl.dat",
-    "snapshot_blob.bin",
-    "v8_context_snapshot.bin"
-)
+# Chromium 100+ uses a versioned directory layout: chrome.exe lives at the
+# output root while chrome.dll and all data files go into a <version>\ subdir.
+# chrome.exe embeds an SxS manifest that references chrome.dll as a win32
+# assembly named after the version string (e.g. "141.0.7390.37").  Windows SxS
+# resolves this assembly by looking for a directory with that exact name next
+# to chrome.exe -- a flat layout (everything in one folder) causes the
+# "Dependent assembly not found" activation-context error.
+# Older Chromium builds (before ~100) used a flat layout; we handle both.
+$versionedOutDir = Join-Path $OUT_DIR $chromiumVersion
+$useVersionedLayout = Test-Path (Join-Path $versionedOutDir "chrome.dll")
 
-foreach ($f in $filesToDist) {
-    $src = Join-Path $OUT_DIR $f
-    if (Test-Path $src) {
-        Write-Host "  Copying $f"
-        Copy-Item $src $DIST_DIR -Force
-    } else {
-        Write-Host "  WARNING: $f not found in output, skipping"
+if ($useVersionedLayout) {
+    Write-Host "  Versioned layout detected: binaries are in $chromiumVersion\"
+
+    # Launcher stubs that belong at the installation root alongside chrome.exe.
+    $rootFiles = @(
+        "chrome.exe",
+        "chrome_proxy.exe",
+        "chrome_pwa_launcher.exe",
+        "elevation_service.exe",
+        "notification_helper.exe"
+    )
+    foreach ($f in $rootFiles) {
+        $src = Join-Path $OUT_DIR $f
+        if (Test-Path $src) {
+            Write-Host "  Copying $f"
+            Copy-Item $src $DIST_DIR -Force
+        }
     }
-}
 
-# Copy locales directory.
-$localesDir = Join-Path $OUT_DIR "locales"
-if (Test-Path $localesDir) {
-    Copy-Item $localesDir (Join-Path $DIST_DIR "locales") -Recurse -Force
+    # Copy the entire version subdirectory tree (chrome.dll, paks, locales, …).
+    $destVersionDir = Join-Path $DIST_DIR $chromiumVersion
+    Write-Host "  Copying $chromiumVersion\ subtree to dist\$chromiumVersion\ ..."
+    Copy-Item $versionedOutDir $destVersionDir -Recurse -Force
+    Write-Host "  Version directory copied."
+} else {
+    Write-Host "  Flat layout detected: copying binaries directly to dist\"
+
+    $filesToDist = @(
+        "chrome.exe",
+        "chrome.dll",
+        "chrome_elf.dll",
+        "chrome_100_percent.pak",
+        "chrome_200_percent.pak",
+        "resources.pak",
+        "icudtl.dat",
+        "snapshot_blob.bin",
+        "v8_context_snapshot.bin",
+        "d3dcompiler_47.dll",
+        "ffmpeg.dll",
+        "libEGL.dll",
+        "libGLESv2.dll",
+        "vk_swiftshader.dll",
+        "vk_swiftshader_icd.json"
+    )
+
+    foreach ($f in $filesToDist) {
+        $src = Join-Path $OUT_DIR $f
+        if (Test-Path $src) {
+            Write-Host "  Copying $f"
+            Copy-Item $src $DIST_DIR -Force
+        } else {
+            Write-Host "  (skip: $f not found in output)"
+        }
+    }
+
+    # Copy locales directory.
+    $localesDir = Join-Path $OUT_DIR "locales"
+    if (Test-Path $localesDir) {
+        Copy-Item $localesDir (Join-Path $DIST_DIR "locales") -Recurse -Force
+    }
 }
 
 Write-Host "`n[SUCCESS] Build complete!" -ForegroundColor Green
