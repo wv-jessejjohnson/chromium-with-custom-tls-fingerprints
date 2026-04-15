@@ -1,66 +1,50 @@
 From: Custom TLS Fingerprint <noreply@example.com>
 Date: Mon, 1 Jan 2024 00:00:00 +0000
-Subject: [PATCH 2/5] net/socket: apply TLSFingerprintParams in SSLClientSocketImpl::Init()
+Subject: [PATCH 2/4] net/socket: apply TLSFingerprintParams in SSLClientSocketImpl
 
-When TLSFingerprintManager::IsEnabled() returns true, override the default
-BoringSSL configuration with the custom cipher suites, supported groups,
-TLS version limits, EC point formats, and extension order/permutation.
+Adds ApplyTLSFingerprintIfEnabled() called at the end of
+SSLClientSocketImpl::Init(), just before returning OK.  Reads the
+TLSFingerprintManager singleton and overrides BoringSSL settings on the
+per-connection SSL* object.
 
-The per-connection SSL* object (not the shared SSL_CTX*) is configured so
-that different pages/contexts can coexist without races.
-
-Key BoringSSL APIs used:
-  - SSL_set_cipher_list()        — TLS 1.2 and below ciphers
-  - SSL_set_ciphersuites()       — TLS 1.3 cipher suites
-  - SSL_set1_groups()            — supported EC groups (IANA values)
-  - SSL_CTX_set_min_proto_version() / SSL_CTX_set_max_proto_version()
-                                 — version limits (applied on SSL* via helpers)
-  - SSL_set_permute_extensions() — randomize extension order
-  - SSL_set_extension_order()    — fixed extension order (new API, patch 3)
+Also declares the helper in the class private section.
 ---
- net/socket/ssl_client_socket_impl.cc | 118 ++++++++++++++++++++++++++-
- net/socket/ssl_client_socket_impl.h  |   4 +
- 2 files changed, 122 insertions(+)
+ net/socket/ssl_client_socket_impl.cc | 67 ++++++++++++++++++++++++++++
+ net/socket/ssl_client_socket_impl.h  |  1 +
+ 2 files changed, 68 insertions(+)
 
 diff --git a/net/socket/ssl_client_socket_impl.cc b/net/socket/ssl_client_socket_impl.cc
-index 11111111..22222222 100644
+index 00000000..11111111 100644
 --- a/net/socket/ssl_client_socket_impl.cc
 +++ b/net/socket/ssl_client_socket_impl.cc
-@@ -35,6 +35,7 @@
- #include "net/ssl/ssl_client_session_cache.h"
- #include "net/ssl/ssl_config_service.h"
- #include "net/ssl/ssl_info.h"
+@@ -61,6 +61,7 @@
+ #include "net/ssl/ssl_key_logger.h"
+ #include "net/ssl/ssl_private_key.h"
 +#include "net/ssl/tls_fingerprint_config.h"
  #include "net/traffic_annotation/network_traffic_annotation.h"
  #include "third_party/boringssl/src/include/openssl/bio.h"
  #include "third_party/boringssl/src/include/openssl/bytestring.h"
-@@ -42,6 +43,7 @@
- #include "third_party/boringssl/src/include/openssl/err.h"
- #include "third_party/boringssl/src/include/openssl/evp.h"
- #include "third_party/boringssl/src/include/openssl/ssl.h"
-+#include "third_party/boringssl/src/include/openssl/tls1.h"
- 
- namespace net {
- 
-@@ -150,6 +152,87 @@ int SSLClientSocketImpl::Init() {
-   // ... (existing SSL_new and basic setup) ...
- 
-+  // ── Custom TLS Fingerprint ──────────────────────────────────────────────
+@@ -843,9 +843,75 @@
+       !SSL_set1_requested_trust_anchors(ssl_.get(),
+                                         ssl_config_.trust_anchor_ids->data(),
+                                         ssl_config_.trust_anchor_ids->size())) {
+     return ERR_UNEXPECTED;
+   }
+
++  // Apply custom TLS fingerprint if configured via CDP setTLSFingerprint.
 +  ApplyTLSFingerprintIfEnabled();
-+  // ───────────────────────────────────────────────────────────────────────
 +
    return OK;
  }
- 
+
 +void SSLClientSocketImpl::ApplyTLSFingerprintIfEnabled() {
 +  TLSFingerprintManager* mgr = TLSFingerprintManager::GetInstance();
 +  if (!mgr->IsEnabled()) {
 +    return;
 +  }
-+
 +  TLSFingerprintParams fp = mgr->GetParams();
 +
-+  // ── TLS version limits ──────────────────────────────────────────────────
++  // TLS version limits.
 +  if (fp.min_version != 0) {
 +    SSL_set_min_proto_version(ssl_.get(),
 +                              static_cast<uint16_t>(fp.min_version));
@@ -70,9 +54,8 @@ index 11111111..22222222 100644
 +                              static_cast<uint16_t>(fp.max_version));
 +  }
 +
-+  // ── Cipher suites ───────────────────────────────────────────────────────
++  // Cipher suites: split TLS 1.3 (0x1300-0x13FF) from TLS <=1.2.
 +  if (!fp.cipher_suites.empty()) {
-+    // Separate TLS 1.3 suites (0x1300-0x13FF) from TLS ≤1.2 suites.
 +    std::string tls13_names;
 +    std::string tls12_names;
 +    for (uint16_t id : fp.cipher_suites) {
@@ -86,59 +69,38 @@ index 11111111..22222222 100644
 +        tls12_names += name;
 +      }
 +    }
-+    if (!tls12_names.empty()) {
++    if (!tls12_names.empty())
 +      SSL_set_cipher_list(ssl_.get(), tls12_names.c_str());
-+    }
-+    if (!tls13_names.empty()) {
++    if (!tls13_names.empty())
 +      SSL_set_ciphersuites(ssl_.get(), tls13_names.c_str());
-+    }
 +  }
 +
-+  // ── Supported EC groups ─────────────────────────────────────────────────
++  // Supported EC groups (IANA NamedGroup values).
 +  if (!fp.supported_groups.empty()) {
-+    // BoringSSL SSL_set1_groups takes uint16_t IANA NamedGroup values directly.
 +    SSL_set1_groups(ssl_.get(),
 +                    fp.supported_groups.data(),
 +                    fp.supported_groups.size());
 +  }
 +
-+  // ── Extension ordering / permutation ────────────────────────────────────
++  // Extension ordering / permutation.
 +  if (fp.permute_extensions) {
-+    // Use BoringSSL's built-in per-connection extension shuffling.
 +    SSL_set_permute_extensions(ssl_.get(), 1);
 +  } else if (!fp.extension_order.empty()) {
-+    // Fixed custom extension order (requires BoringSSL patch 0001).
 +    SSL_set_extension_order(ssl_.get(),
 +                            fp.extension_order.data(),
 +                            fp.extension_order.size());
 +  }
-+
-+  // ── EC point formats ────────────────────────────────────────────────────
-+  // BoringSSL does not expose a public per-connection API for point formats;
-+  // the uncompressed format (0) is always advertised and is sufficient for
-+  // all modern servers. Log a warning if the caller requested non-standard
-+  // formats so they are aware of the limitation.
-+  if (!fp.ec_point_formats.empty()) {
-+    bool non_standard = false;
-+    for (uint8_t fmt : fp.ec_point_formats) {
-+      if (fmt != 0) { non_standard = true; break; }
-+    }
-+    if (non_standard) {
-+      DVLOG(1) << "TLSFingerprint: custom ec_point_formats requested but "
-+                  "BoringSSL only advertises uncompressed (0); ignoring.";
-+    }
-+  }
 +}
- 
++
+ void SSLClientSocketImpl::DoReadCallback(int rv) {
 diff --git a/net/socket/ssl_client_socket_impl.h b/net/socket/ssl_client_socket_impl.h
-index 33333333..44444444 100644
+index 00000000..11111111 100644
 --- a/net/socket/ssl_client_socket_impl.h
 +++ b/net/socket/ssl_client_socket_impl.h
-@@ -120,3 +120,7 @@ class SSLClientSocketImpl : public SSLClientSocket,
-   // ... existing declarations ...
- 
-+  // Reads TLSFingerprintManager and applies custom TLS settings to ssl_.
-+  // Called at the end of Init(), a no-op if no fingerprint is configured.
-+  void ApplyTLSFingerprintIfEnabled();
-+
-   bssl::UniquePtr<SSL> ssl_;
+@@ -130,6 +130,7 @@
+     FRIEND_TEST_ALL_PREFIXES(SSLClientSocketTest, ParseServerTrustAnchorIDs);
+
+     int Init();
++    void ApplyTLSFingerprintIfEnabled();
+     void DoReadCallback(int result);
+     void DoWriteCallback(int result);
