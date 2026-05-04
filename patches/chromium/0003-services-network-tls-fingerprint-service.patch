@@ -1,188 +1,117 @@
 From: Custom TLS Fingerprint <noreply@example.com>
 Date: Mon, 1 Jan 2024 00:00:00 +0000
-Subject: [PATCH 3/5] services/network: expose TLSFingerprintService via Mojo
+Subject: [PATCH 3/4] services/network: expose SetTLSFingerprint on NetworkService Mojo
 
-Adds a new Mojo interface (tls_fingerprint.mojom) to the network service that
-lets the browser process push TLS fingerprint parameters to the network
-service process at runtime (without restart).
+Adds two methods to the NetworkService Mojo interface so the browser
+process can push TLS fingerprint params to the network service process:
 
-Changes:
-  1. services/network/public/mojom/network_service.mojom  — add BindTLSFingerprintService()
-  2. services/network/network_service.cc/.h               — implement binding
-  3. services/network/tls_fingerprint_service_impl.cc/.h  — new impl (copy from src/)
-  4. services/network/BUILD.gn                            — wire everything up
+  NetworkService::SetTLSFingerprint(...)  — activate custom fingerprint
+  NetworkService::ResetTLSFingerprint()   — revert to Chromium defaults
 
-After applying this patch, copy:
-  src/chromium/services/network/public/mojom/tls_fingerprint.mojom
-  → services/network/public/mojom/tls_fingerprint.mojom
+Both methods delegate to net::TLSFingerprintManager, the per-process
+singleton read by SSLClientSocketImpl on every new connection.
 ---
- services/network/BUILD.gn                             |  8 +++++
- services/network/network_service.cc                   | 20 +++++++++++++
- services/network/network_service.h                    |  7 +++++
- services/network/public/mojom/network_service.mojom   |  6 ++++
- services/network/tls_fingerprint_service_impl.cc      | 48 +++++++++++++++++++++++++++++++
- services/network/tls_fingerprint_service_impl.h       | 32 +++++++++++++++++++++
- 6 files changed, 121 insertions(+)
+ services/network/network_service.cc                 | 37 +++++++++++++
+ services/network/network_service.h                  |  9 ++++
+ services/network/public/mojom/network_service.mojom | 19 +++++++
+ 3 files changed, 65 insertions(+)
 
-diff --git a/services/network/BUILD.gn b/services/network/BUILD.gn
-index aaaabbbb..ccccdddd 100644
---- a/services/network/BUILD.gn
-+++ b/services/network/BUILD.gn
-@@ -200,9 +200,17 @@ component("network_service") {
-   sources = [
-     # ... existing sources ...
-+    "tls_fingerprint_service_impl.cc",
-+    "tls_fingerprint_service_impl.h",
-   ]
-   deps = [
-     # ... existing deps ...
-+    "//net/ssl:ssl",  # for TLSFingerprintManager
-   ]
- }
- 
-+# Mojom for TLS fingerprint IPC
-+mojom("tls_fingerprint_mojom") {
-+  sources = [ "public/mojom/tls_fingerprint.mojom" ]
-+  public_deps = [ "//mojo/public/mojom/base" ]
-+}
- 
-diff --git a/services/network/network_service.mojom b/services/network/public/mojom/network_service.mojom
-index eeeeffff..00001111 100644
+diff --git a/services/network/public/mojom/network_service.mojom b/services/network/public/mojom/network_service.mojom
+index 00000000..11111111 100644
 --- a/services/network/public/mojom/network_service.mojom
 +++ b/services/network/public/mojom/network_service.mojom
-@@ -10,8 +10,14 @@ import "services/network/public/mojom/network_context.mojom";
- import "services/network/public/mojom/network_types.mojom";
- import "services/network/public/mojom/url_loader.mojom";
- import "services/network/public/mojom/url_loader_factory.mojom";
+@@ -26,6 +26,7 @@
+ import "services/network/public/mojom/network_context.mojom";
+ import "services/network/public/mojom/network_interface.mojom";
+ import "services/network/public/mojom/network_interface_change_listener.mojom";
 +import "services/network/public/mojom/tls_fingerprint.mojom";
- 
- interface NetworkService {
-   // ... existing methods ...
+ import "services/network/public/mojom/network_param.mojom";
+ import "services/network/public/mojom/network_quality_estimator_manager.mojom";
+@@ -483,5 +483,24 @@
+   // Enables or disables TLS 1.3 Early Data.
+   SetTLS13EarlyDataEnabled(bool enabled);
+
++  // Sets a custom TLS ClientHello fingerprint for all subsequent SSL
++  // connections in this network service process.
++  // Pass enabled=true to activate; min_version/max_version of 0 mean "keep
++  // Chromium default".  Empty arrays mean "keep BoringSSL defaults".
++  SetTLSFingerprint(
++      uint16 min_version,
++      uint16 max_version,
++      array<uint16> cipher_suites,
++      array<uint16> supported_groups,
++      array<uint8>  ec_point_formats,
++      array<uint16> extension_order,
++      bool permute_extensions,
++      bool enabled) => ();
 +
-+  // Binds the TLS fingerprint configuration service.
-+  // Call once at browser startup; the receiver lives for the service lifetime.
-+  BindTLSFingerprintService(
-+      pending_receiver<TLSFingerprintService> receiver);
++  // Reverts to Chromium default TLS behaviour, undoing SetTLSFingerprint.
++  ResetTLSFingerprint() => ();
++
  };
- 
 diff --git a/services/network/network_service.h b/services/network/network_service.h
-index 22223333..44445555 100644
+index 00000000..11111111 100644
 --- a/services/network/network_service.h
 +++ b/services/network/network_service.h
-@@ -55,5 +55,12 @@ class NetworkService : public mojom::NetworkService {
-   // ... existing declarations ...
- 
-+  // mojom::NetworkService:
-+  void BindTLSFingerprintService(
-+      mojo::PendingReceiver<mojom::TLSFingerprintService> receiver) override;
+@@ -188,6 +188,15 @@
+   void SetTLS13EarlyDataEnabled(bool enabled) override;
+
++  void SetTLSFingerprint(uint16_t min_version,
++                         uint16_t max_version,
++                         const std::vector<uint16_t>& cipher_suites,
++                         const std::vector<uint16_t>& supported_groups,
++                         const std::vector<uint8_t>& ec_point_formats,
++                         const std::vector<uint16_t>& extension_order,
++                         bool permute_extensions,
++                         bool enabled,
++                         SetTLSFingerprintCallback callback) override;
++  void ResetTLSFingerprint(ResetTLSFingerprintCallback callback) override;
 +
-  private:
-+  std::unique_ptr<TLSFingerprintServiceImpl> tls_fingerprint_service_;
-+  mojo::Receiver<mojom::TLSFingerprintService>
-+      tls_fingerprint_receiver_{nullptr};
- };
- 
+   void StartNetLogBounded(base::File file,
 diff --git a/services/network/network_service.cc b/services/network/network_service.cc
-index 66667777..88889999 100644
+index 00000000..11111111 100644
 --- a/services/network/network_service.cc
 +++ b/services/network/network_service.cc
-@@ -30,5 +30,17 @@
- #include "services/network/network_service.h"
-+#include "services/network/tls_fingerprint_service_impl.h"
- 
- // ... existing code ...
- 
-+void NetworkService::BindTLSFingerprintService(
-+    mojo::PendingReceiver<mojom::TLSFingerprintService> receiver) {
-+  if (!tls_fingerprint_service_) {
-+    tls_fingerprint_service_ = std::make_unique<TLSFingerprintServiceImpl>();
-+  }
-+  tls_fingerprint_receiver_.Bind(std::move(receiver));
-+  tls_fingerprint_receiver_.set_disconnect_handler(base::BindOnce(
-+      [](NetworkService* svc) {
-+        svc->tls_fingerprint_service_.reset();
-+      }, base::Unretained(this)));
-+}
- 
---- /dev/null
-+++ b/services/network/tls_fingerprint_service_impl.h
-@@ -0,1 +1,27 @@
-+// Copyright 2024 The Chromium Authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license.
-+
-+#ifndef SERVICES_NETWORK_TLS_FINGERPRINT_SERVICE_IMPL_H_
-+#define SERVICES_NETWORK_TLS_FINGERPRINT_SERVICE_IMPL_H_
-+
-+#include "services/network/public/mojom/tls_fingerprint.mojom.h"
-+
-+namespace network {
-+
-+// Implements mojom::TLSFingerprintService in the network service process.
-+// Delegates to net::TLSFingerprintManager (the net/ singleton).
-+class TLSFingerprintServiceImpl : public mojom::TLSFingerprintService {
-+ public:
-+  TLSFingerprintServiceImpl() = default;
-+  ~TLSFingerprintServiceImpl() override = default;
-+
-+  // mojom::TLSFingerprintService:
-+  void SetParams(mojom::TLSFingerprintParamsPtr params,
-+                 SetParamsCallback callback) override;
-+  void Reset(ResetCallback callback) override;
-+};
-+
-+}  // namespace network
-+
-+#endif  // SERVICES_NETWORK_TLS_FINGERPRINT_SERVICE_IMPL_H_
- 
---- /dev/null
-+++ b/services/network/tls_fingerprint_service_impl.cc
-@@ -0,0 +1,49 @@
-+// Copyright 2024 The Chromium Authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license.
-+
-+#include "services/network/tls_fingerprint_service_impl.h"
-+
+@@ -76,6 +76,7 @@
+ #include "net/nqe/network_quality_estimator.h"
+ #include "net/socket/client_socket_pool_manager.h"
+ #include "net/ssl/ssl_key_logger_impl.h"
 +#include "net/ssl/tls_fingerprint_config.h"
+ #include "net/url_request/url_request_context.h"
+ #include "services/network/dns_config_change_manager.h"
+@@ -1313,4 +1313,41 @@
+ void NetworkService::SetTpcdMetadataGrants(
+     const std::vector<ContentSettingPatternSource>& settings) {
+   tpcd_metadata_manager_->SetGrants(settings);
+ }
 +
-+namespace network {
-+
-+namespace {
-+
-+// Converts the Mojo struct to the net:: struct.
-+net::TLSFingerprintParams FromMojo(
-+    const mojom::TLSFingerprintParams& mojo) {
-+  net::TLSFingerprintParams p;
-+  p.min_version = mojo.min_version;
-+  p.max_version = mojo.max_version;
-+  p.cipher_suites =
-+      std::vector<uint16_t>(mojo.cipher_suites.begin(),
-+                            mojo.cipher_suites.end());
-+  p.supported_groups =
-+      std::vector<uint16_t>(mojo.supported_groups.begin(),
-+                            mojo.supported_groups.end());
-+  p.ec_point_formats =
-+      std::vector<uint8_t>(mojo.ec_point_formats.begin(),
-+                           mojo.ec_point_formats.end());
-+  p.extension_order =
-+      std::vector<uint16_t>(mojo.extension_order.begin(),
-+                            mojo.extension_order.end());
-+  p.permute_extensions = mojo.permute_extensions;
-+  p.enabled = mojo.enabled;
-+  return p;
-+}
-+
-+}  // namespace
-+
-+void TLSFingerprintServiceImpl::SetParams(
-+    mojom::TLSFingerprintParamsPtr params,
-+    SetParamsCallback callback) {
-+  net::TLSFingerprintManager::GetInstance()->SetParams(FromMojo(*params));
++void NetworkService::SetTLSFingerprint(
++    uint16_t min_version,
++    uint16_t max_version,
++    const std::vector<uint16_t>& cipher_suites,
++    const std::vector<uint16_t>& supported_groups,
++    const std::vector<uint8_t>& ec_point_formats,
++    const std::vector<uint16_t>& extension_order,
++    bool permute_extensions,
++    bool enabled,
++    SetTLSFingerprintCallback callback) {
++  net::TLSFingerprintParams params;
++  params.min_version       = min_version;
++  params.max_version       = max_version;
++  params.cipher_suites     = cipher_suites;
++  params.supported_groups  = supported_groups;
++  params.ec_point_formats  = ec_point_formats;
++  params.extension_order   = extension_order;
++  params.permute_extensions = permute_extensions;
++  params.enabled           = enabled;
++  net::TLSFingerprintManager::GetInstance()->SetParams(params);
 +  std::move(callback).Run();
 +}
 +
-+void TLSFingerprintServiceImpl::Reset(ResetCallback callback) {
++void NetworkService::ResetTLSFingerprint(
++    ResetTLSFingerprintCallback callback) {
 +  net::TLSFingerprintManager::GetInstance()->Reset();
 +  std::move(callback).Run();
 +}
 +
-+}  // namespace network
+ }  // namespace network
